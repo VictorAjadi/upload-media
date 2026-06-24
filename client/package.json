@@ -1,5 +1,5 @@
 {
-  "name": "@upload-media/client",
+  "name": "upload-media-client",
   "version": "1.0.0",
   "description": "Framework-agnostic chunk and direct file upload client library",
   "main": "./dist/index.js",

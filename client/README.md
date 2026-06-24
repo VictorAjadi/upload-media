@@ -1,8 +1,8 @@
-# @upload-media/client
+# upload-media-client
 
 🚀 **A Premium, Worker-Powered Upload Orchestration Engine for the Modern Web.**
 
-`@upload-media/client` is more than a simple file uploader; it is a professional-grade client-side processing, state-management, and reliability pipeline. Designed to handle massive files (up to 4GB+) and volatile network environments, it leverages Web Workers and IndexedDB to provide a desktop-grade experience in any web browser.
+`upload-media-client` is more than a simple file uploader; it is a professional-grade client-side processing, state-management, and reliability pipeline. Designed to handle massive files (up to 4GB+) and volatile network environments, it leverages Web Workers and IndexedDB to provide a desktop-grade experience in any web browser.
 
 ---
 
@@ -50,7 +50,7 @@ The library follows a strict **Message-Oriented Architecture** to ensure that th
 // hooks/useUploadProgress.ts
 import { useStore } from 'zustand';
 // Import the raw vanilla store instance 
-import { useUploadProgress as vanillaUploadProgressStore } from '@upload-media/client';
+import { useUploadProgress as vanillaUploadProgressStore } from 'upload-media-client';
 
 /**
  * Create a reactive React hook from the vanilla store.
@@ -66,7 +66,7 @@ export const useUploadProgress = <T>(selector: (state: any) => T): T => {
 ```typescript
 // components/FileUploader.tsx
 import { useRef } from 'react';
-import { useUploadActions,useUploadProgress } from '@upload-media/client';
+import { useUploadActions,useUploadProgress } from 'upload-media-client';
 
 export function FileUploader() {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -177,7 +177,7 @@ export function FileUploader() {
   <script type="importmap">
   {
     "imports": {
-      "@upload-media/client": "https://unpkg.com/@upload-media/client@latest/dist/index.mjs",
+      "upload-media-client": "https://unpkg.com/upload-media-client@latest/dist/index.mjs",
       "zustand/vanilla": "https://unpkg.com/zustand@latest/esm/vanilla.mjs",
       "zustand/middleware": "https://unpkg.com/zustand@latest/esm/middleware.mjs",
       "immer": "https://unpkg.com/immer@latest/dist/immer.mjs",
@@ -201,7 +201,7 @@ export function FileUploader() {
 
 #### JavaScript (upload.js)
 ```javascript
-import { useUploadActions, useUploadProgress, setUploadMediaConfig } from '@upload-media/client';
+import { useUploadActions, useUploadProgress, setUploadMediaConfig } from 'upload-media-client';
 
 const fileInput = document.getElementById('fileInput');
 const uploadBtn = document.getElementById('uploadBtn');
@@ -337,7 +337,7 @@ function addToGallery(filename, url) {
 #### Vue 3 (Composition API)
 ```typescript
 import { ref } from 'vue';
-import { useUploadActions,useUploadProgress } from '@upload-media/client';
+import { useUploadActions,useUploadProgress } from 'upload-media-client';
 
 export default {
   setup() {
@@ -363,7 +363,7 @@ export default {
 #### Svelte
 ```typescript
 <script>
-  import { useUploadActions,useUploadProgress } from '@upload-media/client';
+  import { useUploadActions,useUploadProgress } from 'upload-media-client';
 
   let fileInput;
   const { initializeUpload } = useUploadActions();
@@ -441,7 +441,7 @@ useUploadProgress.subscribe(state => {
 ### 3. Configuration via `setUploadMediaConfig()`
 
 ```typescript
-import { setUploadMediaConfig } from '@upload-media/client';
+import { setUploadMediaConfig } from 'upload-media-client';
 
 setUploadMediaConfig({
   maxConcurrent: 3,              // Parallel uploads
@@ -485,7 +485,7 @@ setUploadMediaConfig({
 The library includes browser-side WASM tools for trimming videos and audio without server processing.
 
 ```typescript
-import { useVideoTrimmer, useAudioTrimmer } from '@upload-media/client';
+import { useVideoTrimmer, useAudioTrimmer } from 'upload-media-client';
 
 // Video trimming
 const { trim: trimVideo, cancel } = useVideoTrimmer();
@@ -523,7 +523,7 @@ Cross-Origin-Embedder-Policy: require-corp
 
 ## 📊 The Analytics Engine
 
-`@upload-media/client` includes professional-grade speed tracking:
+`upload-media-client` includes professional-grade speed tracking:
 
 - **Sliding Window Average**: Tracks the last 5 successful network transfers for consistent speed calculation.
 - **Bytes-Per-Second**: Calculated by dividing transferred bytes by elapsed time.
@@ -584,7 +584,7 @@ state.uploads
 ---
 
 ## 📄 License
-MIT © 2026 UploadMedia. Distributed as part of the @upload-media ecosystem.
+MIT © 2026 UploadMedia. Distributed as part of the upload-media ecosystem.
 
 ---
 
