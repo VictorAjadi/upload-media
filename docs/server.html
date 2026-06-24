@@ -1,0 +1,1039 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Server Manual | UploadMedia Documentation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body class="bg-slate-950 text-slate-300 antialiased selection:bg-blue-500/30 selection:text-white">
+
+  <!-- Sidebar -->
+  <aside
+    class="sidebar fixed left-0 top-0 h-screen w-72 bg-slate-900 border-r border-slate-800 hidden lg:flex flex-col z-50">
+    <div class="p-5 pb-4">
+      <div class="flex items-center gap-3 mb-8 text-white font-bold text-xl uppercase tracking-tighter">
+        <i data-lucide="upload-cloud" class="text-blue-500 w-8 h-8"></i>
+        <span>UploadMedia</span>
+      </div>
+    </div>
+    <nav class="flex-1 overflow-y-auto px-6 py-4 space-y-8">
+      <div>
+        <p class="text-xs font-bold text-slate-600 uppercase tracking-widest mb-4">Pages</p>
+        <div class="space-y-1 text-sm">
+          <a href="index.html" class="sidebar-link"><i data-lucide="book-open"></i> Introduction</a>
+          <a href="server.html" class="sidebar-link active"><i data-lucide="server"></i> Server Manual</a>
+          <a href="client.html" class="sidebar-link"><i data-lucide="mouse-pointer"></i> Client Manual</a>
+          <a href="api.html" class="sidebar-link"><i data-lucide="code-2"></i> API Reference</a>
+        </div>
+      </div>
+      <div>
+        <p class="text-xs font-bold text-slate-600 uppercase tracking-widest mb-4">On this page</p>
+        <div class="space-y-1 text-sm">
+          <a href="#full-example" class="sidebar-link"><i data-lucide="play"></i> Full Example</a>
+          <a href="#config" class="sidebar-link"><i data-lucide="settings-2"></i> Configuration</a>
+          <a href="#adapters" class="sidebar-link"><i data-lucide="layers"></i> Adapters</a>
+          <a href="#storages" class="sidebar-link"><i data-lucide="hard-drive"></i> Storage</a>
+          <a href="#databases" class="sidebar-link"><i data-lucide="database"></i> Databases</a>
+          <a href="#serving" class="sidebar-link"><i data-lucide="play-circle"></i> Serving</a>
+          <a href="#hooks" class="sidebar-link"><i data-lucide="anchor"></i> Hooks</a>
+          <a href="#internals" class="sidebar-link"><i data-lucide="cpu"></i> Internals</a>
+        </div>
+      </div>
+
+      <div>
+        <p class="text-xs font-bold text-slate-600 uppercase tracking-widest mb-4">Help & Support</p>
+        <div class="space-y-1 text-sm">
+          <a href="index.html#faq" class="sidebar-link"><i data-lucide="help-circle"></i> FAQ</a>
+          <a href="index.html#troubleshooting" class="sidebar-link"><i data-lucide="zap"></i> Troubleshooting</a>
+        </div>
+      </div>
+    </nav>
+  </aside>
+
+  <main class="lg:ml-72 min-h-screen">
+    <div class="max-w-4xl mx-auto px-8 py-10 pb-40">
+      <header class="mb-16">
+        <h1 class="text-4xl font-black text-white mb-4">Server-Side Manual</h1>
+        <p class="text-lg text-slate-400 max-w-2xl">Complete guide to configuring the backend engine, framework
+          adapters, storage providers, and database repositories.</p>
+      </header>
+
+      <!-- ============================================== -->
+      <!-- 1. FULL PRODUCTION EXAMPLE                     -->
+      <!-- ============================================== -->
+      <section id="full-example" class="mb-16">
+        <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Complete Production Example</h2>
+        <p class="mb-8 text-sm text-slate-400">This Express example shows the recommended end-to-end setup: dual
+          storage, Mongoose persistence, and the background task pattern.</p>
+        <div class="code-container">
+          <div class="code-header">server.ts</div>
+          <pre>
+<span class="token-keyword">import</span> {
+  UploadEngine,
+  S3StorageAdapter,
+  LocalDiskStorageAdapter,
+  CloudinaryStorageAdapter,
+  MongooseRepository,
+  createExpressAdapter,
+  createExpressFileServingMiddleware
+} <span class="token-keyword">from</span> <span class="token-string">'@upload-media/server'</span>;
+
+<span class="token-comment">// ── Storage ──────────────────────────────────────</span>
+<span class="token-keyword">const</span> s3 = <span class="token-keyword">new</span> <span class="token-function">S3StorageAdapter</span>({
+  bucket: <span class="token-string">'prod-bucket'</span>,
+  region: <span class="token-string">'us-east-1'</span>,
+  credentials: { accessKeyId: <span class="token-string">'...'</span>, secretAccessKey: <span class="token-string">'...'</span> }
+});
+
+<span class="token-keyword">const</span> local = <span class="token-keyword">new</span> <span class="token-function">LocalDiskStorageAdapter</span>({
+  rootDir: <span class="token-string">'./uploads'</span>,
+  publicBaseUrl: <span class="token-string">'http://localhost:3000/static'</span>
+});
+
+<span class="token-keyword">const</span> cloudinary = <span class="token-keyword">new</span> <span class="token-function">CloudinaryStorageAdapter</span>({
+  cloudName: <span class="token-string">'my-cloud'</span>,
+  apiKey: <span class="token-string">'...'</span>,
+  apiSecret: <span class="token-string">'...'</span>,
+  folder: <span class="token-string">'user_uploads'</span>
+});
+
+<span class="token-comment">// ── Database ─────────────────────────────────────</span>
+<span class="token-keyword">const</span> database = <span class="token-keyword">new</span> <span class="token-function">MongooseRepository</span>({
+  mongooseConnection: mongoose.connection
+});
+
+<span class="token-comment">// ── Engine ────────────────────────────────────────</span>
+<span class="token-keyword">const</span> engine = <span class="token-keyword">new</span> <span class="token-function">UploadEngine</span>({
+  database,
+  storages: { s3, local, cloudinary },
+  defaultStorage: <span class="token-string">'s3'</span>,
+  uploadTypes: {
+    avatar: {
+      allowedKinds: [<span class="token-string">'image'</span>],
+      limits: { image: 5 * 1024 * 1024 },
+      storage: <span class="token-string">'cloudinary'</span>,
+      thumbnails: <span class="token-keyword">true</span>
+    },
+    video: {
+      allowedKinds: [<span class="token-string">'video'</span>],
+      limits: { video: 500 * 1024 * 1024 },
+      thumbnails: <span class="token-keyword">true</span>,
+      quality: <span class="token-string">'high'</span>
+    }
+  }
+});
+
+<span class="token-comment">// ── Route ─────────────────────────────────────────</span>
+<span class="token-keyword">const</span> adapter = <span class="token-function">createExpressAdapter</span>();
+
+app.<span class="token-function">post</span>(<span class="token-string">'/api/upload'</span>, adapter.<span class="token-function">wrap</span>(<span class="token-keyword">async</span> (req, res) => {
+  <span class="token-keyword">const</span> result = <span class="token-keyword">await</span> engine.<span class="token-function">handle</span>(req, res);
+
+  <span class="token-keyword">if</span> (result.status === <span class="token-string">'success'</span>) {
+    <span class="token-keyword">return</span> {
+      ...result,
+      onBackground: <span class="token-keyword">async</span> () => {
+        <span class="token-keyword">await</span> <span class="token-function">notifyAnalytics</span>(req.fileFields[<span class="token-string">'video'</span>][0].id);
+      }
+    };
+  }
+  <span class="token-keyword">return</span> result;
+}));
+
+<span class="token-comment">// ── File Serving ──────────────────────────────────</span>
+app.<span class="token-function">use</span>(<span class="token-string">'/stream'</span>, <span class="token-function">createExpressFileServingMiddleware</span>(<span class="token-string">'./uploads'</span>, {
+  database,
+  cacheMaxAge: <span class="token-string">'30d'</span>
+}));
+</pre>
+        </div>
+      </section>
+
+      <!-- ============================================== -->
+      <!-- 2. ENGINE CONFIGURATION                        -->
+      <!-- ============================================== -->
+      <section id="config" class="mb-16">
+        <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Engine Configuration</h2>
+
+        <h4 class="text-white font-bold mb-4 flex items-center gap-2"><i data-lucide="settings-2"
+            class="w-4 h-4 text-blue-500"></i> UploadEngineConfig</h4>
+        <div class="data-table-container mb-10">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Property</th>
+                <th>Type</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody class="text-sm">
+              <tr>
+                <td class="font-mono text-blue-400">storages</td>
+                <td>Record&lt;string, StorageAdapter&gt;</td>
+                <td>-</td>
+                <td>Named map of storage backends.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">defaultStorage</td>
+                <td>string</td>
+                <td>-</td>
+                <td>Key of the primary storage provider.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">database</td>
+                <td>MetadataRepository</td>
+                <td>-</td>
+                <td>Database adapter for file records.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">uploadTypes</td>
+                <td>Record&lt;string, UploadTypeConfig&gt;</td>
+                <td>-</td>
+                <td>Named upload context definitions.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">autoRespond</td>
+                <td>boolean</td>
+                <td>true</td>
+                <td>Auto-send JSON response on completion.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">maxFieldSize</td>
+                <td>number</td>
+                <td>1MB</td>
+                <td>Size cap for non-file text fields.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">maxFiles</td>
+                <td>number</td>
+                <td>10</td>
+                <td>Max concurrent files per batch.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">staleRetentionMs</td>
+                <td>number</td>
+                <td>24h</td>
+                <td>TTL before incomplete chunks are purged.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">onUploadComplete</td>
+                <td>Function</td>
+                <td>-</td>
+                <td>Hook fired after storage reassembly.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">onError</td>
+                <td>Function</td>
+                <td>-</td>
+                <td>Global handler for fatal exceptions.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4 class="text-white font-bold mb-4 flex items-center gap-2"><i data-lucide="tag"
+            class="w-4 h-4 text-purple-500"></i> UploadTypeConfig</h4>
+        <div class="data-table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Property</th>
+                <th>Type</th>
+                <th>Required</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody class="text-sm">
+              <tr>
+                <td>name</td>
+                <td>string</td>
+                <td>Yes</td>
+                <td>Context ID (e.g. 'posts', 'profile').</td>
+              </tr>
+              <tr>
+                <td>allowedKinds</td>
+                <td>MediaKind[]</td>
+                <td>Yes</td>
+                <td>'image', 'video', 'audio', 'document'.</td>
+              </tr>
+              <tr>
+                <td>limits</td>
+                <td>Record</td>
+                <td>Yes</td>
+                <td>Total size caps per media kind.</td>
+              </tr>
+              <tr>
+                <td>chunkLimits</td>
+                <td>Record</td>
+                <td>No</td>
+                <td>Max size for individual chunks.</td>
+              </tr>
+              <tr>
+                <td>storage</td>
+                <td>string</td>
+                <td>No</td>
+                <td>Override the default storage for this type.</td>
+              </tr>
+              <tr>
+                <td>thumbnails</td>
+                <td>boolean</td>
+                <td>No</td>
+                <td>Enable auto thumbnail generation.</td>
+              </tr>
+              <tr>
+                <td>quality</td>
+                <td>string</td>
+                <td>No</td>
+                <td>Processing profile: 'low', 'medium', 'high'. Supports images, videos, and now <b>audio</b>.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============================================== -->
+      <!-- 3. FRAMEWORK ADAPTERS                          -->
+      <!-- ============================================== -->
+      <section id="adapters" class="mb-16">
+        <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">The 8 Framework Adapters</h2>
+        <p class="mb-8 text-sm text-slate-400">Every adapter exposes the same <code>wrap()</code> method. The engine
+          call is always <code>const result = await engine.handle(req, res)</code>.</p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="space-y-3">
+            <h4 class="text-sm font-bold text-blue-400 uppercase">1. Express.js</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">const</span> adapter = <span class="token-function">createExpressAdapter</span>();
+app.<span class="token-function">post</span>(<span class="token-string">'/upload'</span>, adapter.<span class="token-function">wrap</span>(<span class="token-keyword">async</span> (req, res) => {
+  <span class="token-keyword">const</span> result = <span class="token-keyword">await</span> engine.<span class="token-function">handle</span>(req, res);
+  <span class="token-keyword">return</span> result;
+}));</pre>
+            </div>
+          </div>
+          <div class="space-y-3">
+            <h4 class="text-sm font-bold text-orange-400 uppercase">2. Hono (Edge)</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">const</span> adapter = <span class="token-function">createHonoAdapter</span>();
+app.<span class="token-function">post</span>(<span class="token-string">'/upload'</span>, adapter.<span class="token-function">wrap</span>(<span class="token-keyword">async</span> (req, res) => {
+  <span class="token-keyword">const</span> result = <span class="token-keyword">await</span> engine.<span class="token-function">handle</span>(req, res);
+  <span class="token-keyword">return</span> result;
+}));</pre>
+            </div>
+          </div>
+          <div class="space-y-3">
+            <h4 class="text-sm font-bold text-cyan-400 uppercase">3. Fastify</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">const</span> adapter = <span class="token-function">createFastifyAdapter</span>();
+fastify.<span class="token-function">post</span>(<span class="token-string">'/upload'</span>, adapter.<span class="token-function">wrap</span>(<span class="token-keyword">async</span> (req, res) => {
+  <span class="token-keyword">const</span> result = <span class="token-keyword">await</span> engine.<span class="token-function">handle</span>(req, res);
+  <span class="token-keyword">return</span> result;
+}));</pre>
+            </div>
+          </div>
+          <div class="space-y-3">
+            <h4 class="text-sm font-bold text-white uppercase">4. Next.js</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">const</span> adapter = <span class="token-function">createNextjsAdapter</span>();
+<span class="token-keyword">export async function</span> <span class="token-function">POST</span>(request: Request) {
+  <span class="token-keyword">return await</span> adapter.<span class="token-function">wrap</span>(<span class="token-keyword">async</span> (req, res) => {
+    <span class="token-keyword">return await</span> engine.<span class="token-function">handle</span>(req, res);
+  })(request);
+}</pre>
+            </div>
+          </div>
+          <div class="space-y-3">
+            <h4 class="text-sm font-bold text-green-400 uppercase">5. Koa.js</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">const</span> adapter = <span class="token-function">createKoaAdapter</span>();
+router.<span class="token-function">post</span>(<span class="token-string">'/upload'</span>, adapter.<span class="token-function">wrap</span>(<span class="token-keyword">async</span> (req, res) => {
+  <span class="token-keyword">const</span> result = <span class="token-keyword">await</span> engine.<span class="token-function">handle</span>(req, res);
+  <span class="token-keyword">return</span> result;
+}));</pre>
+            </div>
+          </div>
+          <div class="space-y-3">
+            <h4 class="text-sm font-bold text-pink-400 uppercase">6. Elysia (Bun)</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">const</span> adapter = <span class="token-function">createElysiaAdapter</span>();
+app.<span class="token-function">post</span>(<span class="token-string">'/upload'</span>, adapter.<span class="token-function">wrap</span>(<span class="token-keyword">async</span> (req, res) => {
+  <span class="token-keyword">const</span> result = <span class="token-keyword">await</span> engine.<span class="token-function">handle</span>(req, res);
+  <span class="token-keyword">return</span> result;
+}));</pre>
+            </div>
+          </div>
+          <div class="space-y-3">
+            <h4 class="text-sm font-bold text-yellow-400 uppercase">7. H3 / Nuxt</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">const</span> adapter = <span class="token-function">createH3Adapter</span>();
+<span class="token-keyword">export default</span> <span class="token-function">defineEventHandler</span>(
+  adapter.<span class="token-function">wrap</span>(<span class="token-keyword">async</span> (req, res) => {
+    <span class="token-keyword">return await</span> engine.<span class="token-function">handle</span>(req, res);
+  })
+);</pre>
+            </div>
+          </div>
+          <div class="space-y-3">
+            <h4 class="text-sm font-bold text-slate-400 uppercase">8. Raw Node.js</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">const</span> adapter = <span class="token-function">createRawNodeAdapter</span>();
+<span class="token-keyword">const</span> server = <span class="token-function">createServer</span>(
+  adapter.<span class="token-function">wrap</span>(<span class="token-keyword">async</span> (req, res) => {
+    <span class="token-keyword">return await</span> engine.<span class="token-function">handle</span>(req, res);
+  })
+);</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================== -->
+      <!-- 4. STORAGE PROVIDERS                           -->
+      <!-- ============================================== -->
+      <section id="storages" class="mb-16">
+        <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Storage Providers</h2>
+
+        <!-- Local Disk -->
+        <div class="mb-12">
+          <h4 class="text-white font-bold mb-4">LocalDiskStorageAdapter</h4>
+          <div class="data-table-container mb-4">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Key</th>
+                  <th>Type</th>
+                  <th>Required</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody class="text-sm">
+                <tr>
+                  <td class="font-mono text-blue-400">rootDir</td>
+                  <td>string</td>
+                  <td>Yes</td>
+                  <td>Absolute or relative path for file storage.</td>
+                </tr>
+                <tr>
+                  <td class="font-mono text-blue-400">publicBaseUrl</td>
+                  <td>string</td>
+                  <td>No</td>
+                  <td>URL prefix for serving (e.g. /static).</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-container">
+            <pre>
+<span class="token-keyword">new</span> <span class="token-function">LocalDiskStorageAdapter</span>({ rootDir: <span class="token-string">'./uploads'</span>, publicBaseUrl: <span class="token-string">'/static'</span> });</pre>
+          </div>
+        </div>
+
+        <!-- S3 -->
+        <div class="mb-12">
+          <h4 class="text-white font-bold mb-4">S3StorageAdapter (AWS, MinIO, R2, Spaces, Wasabi)</h4>
+          <div class="data-table-container mb-4">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Key</th>
+                  <th>Type</th>
+                  <th>Required</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody class="text-sm">
+                <tr>
+                  <td class="font-mono text-blue-400">bucket</td>
+                  <td>string</td>
+                  <td>Yes</td>
+                  <td>Bucket name.</td>
+                </tr>
+                <tr>
+                  <td class="font-mono text-blue-400">region</td>
+                  <td>string</td>
+                  <td>Yes</td>
+                  <td>Region endpoint (e.g. us-west-2).</td>
+                </tr>
+                <tr>
+                  <td class="font-mono text-blue-400">credentials</td>
+                  <td>Object</td>
+                  <td>No</td>
+                  <td>{ accessKeyId, secretAccessKey }. Falls back to env vars.</td>
+                </tr>
+                <tr>
+                  <td class="font-mono text-blue-400">endpoint</td>
+                  <td>string</td>
+                  <td>No</td>
+                  <td>Override for non-AWS (MinIO, R2, Spaces, Wasabi).</td>
+                </tr>
+                <tr>
+                  <td class="font-mono text-blue-400">forcePathStyle</td>
+                  <td>boolean</td>
+                  <td>No</td>
+                  <td>Required for MinIO / LocalStack.</td>
+                </tr>
+                <tr>
+                  <td class="font-mono text-blue-400">maxRetries</td>
+                  <td>number</td>
+                  <td>No</td>
+                  <td>Internal SDK retry count.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="flex flex-wrap gap-3 mb-4 text-xs">
+            <span class="badge badge-blue">AWS S3</span>
+            <span class="badge badge-blue">MinIO</span>
+            <span class="badge badge-blue">DigitalOcean Spaces</span>
+            <span class="badge badge-blue">Cloudflare R2</span>
+            <span class="badge badge-blue">Wasabi</span>
+            <span class="badge badge-blue">GCS (S3 interop)</span>
+          </div>
+          <div class="code-container">
+            <pre>
+<span class="token-comment">// Standard AWS</span>
+<span class="token-keyword">new</span> <span class="token-function">S3StorageAdapter</span>({ bucket: <span class="token-string">'my-bucket'</span>, region: <span class="token-string">'us-east-1'</span> });
+
+<span class="token-comment">// Cloudflare R2</span>
+<span class="token-keyword">new</span> <span class="token-function">S3StorageAdapter</span>({
+  bucket: <span class="token-string">'my-r2'</span>, region: <span class="token-string">'auto'</span>,
+  endpoint: <span class="token-string">'https://ACCOUNT.r2.cloudflarestorage.com'</span>
+});
+
+<span class="token-comment">// MinIO (local dev)</span>
+<span class="token-keyword">new</span> <span class="token-function">S3StorageAdapter</span>({
+  bucket: <span class="token-string">'dev'</span>, region: <span class="token-string">'us-east-1'</span>,
+  endpoint: <span class="token-string">'http://localhost:9000'</span>, forcePathStyle: <span class="token-keyword">true</span>
+});</pre>
+          </div>
+        </div>
+
+        <!-- Cloudinary -->
+        <div class="mb-12">
+          <h4 class="text-white font-bold mb-4">CloudinaryStorageAdapter</h4>
+          <div class="data-table-container mb-4">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Key</th>
+                  <th>Type</th>
+                  <th>Required</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody class="text-sm">
+                <tr>
+                  <td class="font-mono text-blue-400">cloudName</td>
+                  <td>string</td>
+                  <td>Yes</td>
+                  <td>Cloudinary cloud name.</td>
+                </tr>
+                <tr>
+                  <td class="font-mono text-blue-400">apiKey</td>
+                  <td>string</td>
+                  <td>Yes</td>
+                  <td>Dashboard API key.</td>
+                </tr>
+                <tr>
+                  <td class="font-mono text-apiSecret">apiSecret</td>
+                  <td>string</td>
+                  <td>Yes</td>
+                  <td>Used for signing uploads.</td>
+                </tr>
+                <tr>
+                  <td class="font-mono text-blue-400">folder</td>
+                  <td>string</td>
+                  <td>No</td>
+                  <td>Sub-folder path in Cloudinary.</td>
+                </tr>
+                <tr>
+                  <td class="font-mono text-blue-400">resourceType</td>
+                  <td>string</td>
+                  <td>No</td>
+                  <td>'image', 'video', 'raw', or 'auto'.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="code-container">
+            <pre>
+<span class="token-keyword">new</span> <span class="token-function">CloudinaryStorageAdapter</span>({
+  cloudName: <span class="token-string">'my-cloud'</span>,
+  apiKey: <span class="token-string">'...'</span>,
+  apiSecret: <span class="token-string">'...'</span>,
+  folder: <span class="token-string">'user_uploads/avatars'</span>
+});</pre>
+          </div>
+        </div>
+
+        <!-- Storage Lifecycle -->
+        <div class="p-6 bg-slate-900/50 rounded-2xl border border-slate-800">
+          <h4 class="text-blue-400 font-bold mb-4 flex items-center gap-2"><i data-lucide="refresh-cw"
+              class="w-4 h-4"></i> Chunk Lifecycle</h4>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs text-slate-500">
+            <div><span class="text-white font-bold block mb-1">01 Staging</span>Chunks written to temp path keyed by
+              sessionId + index.</div>
+            <div><span class="text-white font-bold block mb-1">02 Verify</span>Final chunk triggers integrity check
+              across all parts.</div>
+            <div><span class="text-white font-bold block mb-1">03 Reassemble</span>Parts concatenated (disk) or MPU
+              completed (cloud).</div>
+            <div><span class="text-white font-bold block mb-1">04 Finalize</span>URL generated and record updated in the
+              database.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================== -->
+      <!-- 5. DATABASE REPOSITORIES                       -->
+      <!-- ============================================== -->
+      <section id="databases" class="mb-16">
+        <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Database Repositories</h2>
+        <p class="mb-8 text-sm text-slate-400">Repositories persist file metadata. Three built-in implementations are
+          provided; you can also write your own.</p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">
+          <!-- Mongoose -->
+          <div class="p-5 bg-slate-900 border border-slate-800 rounded-2xl">
+            <h4 class="text-green-400 font-bold mb-3 text-sm uppercase">Mongoose (MongoDB)</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">new</span> <span class="token-function">MongooseRepository</span>({
+  mongooseConnection: mongoose.connection,
+  hooks: { <span class="token-comment">/* optional */</span> }
+});</pre>
+            </div>
+          </div>
+          <!-- SQL -->
+          <div class="p-5 bg-slate-900 border border-slate-800 rounded-2xl">
+            <h4 class="text-cyan-400 font-bold mb-3 text-sm uppercase">SQL (Postgres / MySQL / SQLite)</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">new</span> <span class="token-function">SQLRepository</span>({
+  executor: knexInstance,
+  filesTable: <span class="token-string">'upload_files'</span>,
+  chunksTable: <span class="token-string">'upload_chunks'</span>
+});</pre>
+            </div>
+          </div>
+          <!-- InMemory -->
+          <div class="p-5 bg-slate-900 border border-slate-800 rounded-2xl">
+            <h4 class="text-yellow-400 font-bold mb-3 text-sm uppercase">InMemory (Testing)</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">new</span> <span class="token-function">InMemoryRepository</span>();</pre>
+            </div>
+          </div>
+          <!-- Custom -->
+          <div class="p-5 bg-slate-900 border border-slate-800 rounded-2xl">
+            <h4 class="text-slate-400 font-bold mb-3 text-sm uppercase">Custom (BYO)</h4>
+            <div class="code-container">
+              <pre>
+<span class="token-keyword">class</span> <span class="token-function">MyRepo</span> <span class="token-keyword">implements</span> MetadataRepository {
+  <span class="token-keyword">async</span> <span class="token-function">createFile</span>(file) { <span class="token-comment">/* ... */</span> }
+  <span class="token-keyword">async</span> <span class="token-function">getFileById</span>(id) { <span class="token-comment">/* ... */</span> }
+  <span class="token-comment">// ...6 methods total</span>
+}</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================== -->
+      <!-- 5.5 PERFORMANCE & CACHING                      -->
+      <!-- ============================================== -->
+      <section id="performance" class="mb-16">
+        <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Performance & Caching</h2>
+        <p class="mb-8 text-sm text-slate-400">For high-traffic environments, verifying thousands of chunks against a
+          primary database can become a bottleneck. We recommend integrating a performance cache.</p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="p-6 bg-slate-900 border border-slate-800 rounded-2xl">
+            <h4 class="text-green-400 font-bold mb-3 text-sm uppercase">Smart Mongoose Caching</h4>
+            <p class="text-sm text-slate-500 mb-4">If using MongoDB, integrate <code>@mongoose-performance-cache</code>
+              to eliminate DB contention during chunk storms.</p>
+            <ul class="text-xs text-slate-400 space-y-2 list-disc list-inside">
+              <li><strong>1000+ RPS:</strong> Handles massive chunk ingress without event-loop lag.</li>
+              <li><strong>Smart Invalidation:</strong> Cache stays perfectly synced with your <code>UploadChunks</code>
+                collection.</li>
+              <li><strong>Zero-Allocation:</strong> Utilizes structural hashing to minimize memory pressure.</li>
+            </ul>
+          </div>
+          <div class="p-6 bg-slate-900 border border-slate-800 rounded-2xl">
+            <h4 class="text-blue-400 font-bold mb-3 text-sm uppercase tracking-widest">Custom Redis Hooks</h4>
+            <p class="text-sm text-slate-500 mb-6">High-performance chunk tracking to prevent redundant storage writes.
+            </p>
+            <div class="code-container m-0">
+              <pre class="text-[11px]">
+<span class="token-keyword">const</span> engine = <span class="token-keyword">new</span> <span class="token-function">UploadEngine</span>({
+  <span class="token-keyword">hooks</span>: {
+    <span class="token-function">afterPutObject</span>: <span class="token-keyword">async</span> (ctx) => {
+      <span class="token-keyword">await</span> redis.<span class="token-function">set</span>(<span class="token-string">`chunk:${ctx.id}`</span>, <span class="token-string">'ready'</span>);
+    }
+  }
+});</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================== -->
+      <!-- 6. MEDIA SERVING                               -->
+      <!-- ============================================== -->
+      <section id="serving" class="mb-16">
+        <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Media Serving</h2>
+        <p class="mb-8 text-sm text-slate-400">The serving middleware handles byte-range streaming, MIME resolution from
+          database metadata, ETag generation, and cache headers all in a single mount point.</p>
+
+        <h4 class="text-white font-bold mb-4">Middleware Configuration</h4>
+        <div class="data-table-container mb-10">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Property</th>
+                <th>Type</th>
+                <th>Required</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody class="text-sm">
+              <tr>
+                <td class="font-mono text-blue-400">rootDir</td>
+                <td>string</td>
+                <td>Only for local</td>
+                <td>Physical path to stored files. Only used when <code>storageProvider</code> is <code>'local'</code>.
+                </td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">database</td>
+                <td>MetadataRepository</td>
+                <td>Yes</td>
+                <td>Resolves file identity, content type, and pipes binary chunks for DB-backed files.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">cacheMaxAge</td>
+                <td>string</td>
+                <td>No</td>
+                <td>Cache-Control duration. e.g. <code>'30d'</code>, <code>'1h'</code>.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">onBeforeServe</td>
+                <td>Function</td>
+                <td>No</td>
+                <td>Called before serving. Throw to deny access (RBAC).</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">onAfterServe</td>
+                <td>Function</td>
+                <td>No</td>
+                <td>Called after serving. Use for download auditing.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">onError</td>
+                <td>Function</td>
+                <td>No</td>
+                <td>Called on serving errors. Pipe to Sentry/Datadog.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4 class="text-white font-bold mb-4">Quick Start</h4>
+        <p class="mb-4 text-sm text-slate-400">Mount the middleware on any path. The framework's routing handles path
+          stripping automatically no redundant prefix configuration needed.</p>
+        <div class="code-container mb-10">
+          <div class="code-header">express-serving.ts</div>
+          <pre>
+<span class="token-keyword">import</span> { createExpressFileServingMiddleware } <span class="token-keyword">from</span> <span class="token-string">'@upload-media/server'</span>;
+
+<span class="token-comment">// Database-backed serving (MongoDB or SQL)</span>
+app.<span class="token-function">use</span>(<span class="token-string">'/media'</span>, <span class="token-function">createExpressFileServingMiddleware</span>({
+  database,
+  cacheMaxAge: <span class="token-string">'30d'</span>
+}));
+
+<span class="token-comment">// Local disk serving</span>
+app.<span class="token-function">use</span>(<span class="token-string">'/uploads'</span>, <span class="token-function">createExpressFileServingMiddleware</span>({
+  rootDir: <span class="token-string">'./uploads'</span>,
+  database
+}));
+</pre>
+        </div>
+
+        <h4 class="text-white font-bold mb-4">Serving Dispatch</h4>
+        <p class="mb-6 text-sm text-slate-400">The engine dispatches based on the <code>storageProvider</code> field in
+          the file's database record:</p>
+        <div class="data-table-container mb-10">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>storageProvider</th>
+                <th>Behaviour</th>
+              </tr>
+            </thead>
+            <tbody class="text-sm">
+              <tr>
+                <td class="font-mono text-green-400">'local'</td>
+                <td>Streams from <code>rootDir</code> on disk. Requires <code>rootDir</code> in config.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">'database'</td>
+                <td>Pipes binary chunks directly from SQL/MongoDB.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-purple-400">'s3' / 'cloudinary' / other</td>
+                <td>Issues a 302 redirect to the provider's signed URL.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4 class="text-white font-bold mb-4">Service Handlers with Hooks</h4>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">
+          <!-- MongoDB -->
+          <div class="p-5 bg-slate-900 border border-slate-800 rounded-2xl">
+            <h5 class="text-green-400 font-bold mb-3 text-sm uppercase">MongoDB / Mongoose</h5>
+            <p class="text-xs text-slate-500 mb-4">Serving with access-token validation on every request.</p>
+            <div class="code-container m-0">
+              <pre>
+<span class="token-keyword">const</span> database = <span class="token-keyword">new</span> <span class="token-function">MongooseRepository</span>({ mongooseConnection: conn });
+
+app.<span class="token-function">use</span>(<span class="token-string">'/api/assets'</span>, <span class="token-function">createExpressFileServingMiddleware</span>({
+  database,
+  onBeforeServe: <span class="token-keyword">async</span> (fileId, req) => {
+    <span class="token-keyword">if</span> (!req.headers.authorization) <span class="token-keyword">throw new Error</span>(<span class="token-string">'Unauthorized'</span>);
+  }
+}));</pre>
+            </div>
+          </div>
+
+          <!-- SQL -->
+          <div class="p-5 bg-slate-900 border border-slate-800 rounded-2xl">
+            <h5 class="text-cyan-400 font-bold mb-3 text-sm uppercase">SQL (Postgres / MySQL)</h5>
+            <p class="text-xs text-slate-500 mb-4">Download auditing via serving callbacks.</p>
+            <div class="code-container m-0">
+              <pre>
+<span class="token-keyword">const</span> database = <span class="token-keyword">new</span> <span class="token-function">SQLRepository</span>({ executor: pg, filesTable: <span class="token-string">'media'</span> });
+
+app.<span class="token-function">use</span>(<span class="token-string">'/cdn'</span>, <span class="token-function">createExpressFileServingMiddleware</span>({
+  database,
+  onAfterServe: <span class="token-keyword">async</span> (file, stats) => {
+    <span class="token-keyword">await</span> <span class="token-function">logDownload</span>(file.id, stats.ip);
+  }
+}));</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================== -->
+      <!-- 7. HOOKS                                        -->
+      <!-- ============================================== -->
+      <section id="hooks" class="mb-16">
+        <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Unified Hooks Engine</h2>
+        <p class="mb-10 text-sm text-slate-400 leading-relaxed">The engine provides a centralized event bus that allows
+          you to inject business logic across storage, database, and serving layers.</p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div class="card p-6 bg-slate-900/50 border border-slate-800 rounded-3xl">
+            <h4 class="text-xs font-black text-blue-400 uppercase tracking-widest mb-6">Storage Operations</h4>
+            <div class="data-table-container m-0">
+              <table class="data-table">
+                <tbody class="text-xs">
+                  <tr>
+                    <td><code class="text-blue-300">beforePutObject</code></td>
+                    <td>Pre-validation.</td>
+                  </tr>
+                  <tr>
+                    <td><code class="text-blue-300">afterPutObject</code></td>
+                    <td>Write-event notify.</td>
+                  </tr>
+                  <tr>
+                    <td><code class="text-blue-300">afterFinalize</code></td>
+                    <td>Post-reassembly.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card p-6 bg-slate-900/50 border border-slate-800 rounded-3xl">
+            <h4 class="text-xs font-black text-purple-400 uppercase tracking-widest mb-6">Database persistence</h4>
+            <div class="data-table-container m-0">
+              <table class="data-table">
+                <tbody class="text-xs">
+                  <tr>
+                    <td><code class="text-purple-300">afterCreateFile</code></td>
+                    <td>Search index sync.</td>
+                  </tr>
+                  <tr>
+                    <td><code class="text-purple-300">beforeDeleteFiles</code></td>
+                    <td>Integrity checks.</td>
+                  </tr>
+                  <tr>
+                    <td><code class="text-purple-300">afterFindFiles</code></td>
+                    <td>Path translation.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================== -->
+      <!-- 8. INTERNALS (Contributor)                     -->
+      <!-- ============================================== -->
+      <section id="internals" class="mb-16">
+        <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Internals & Normalization Bridge
+        </h2>
+        <p class="mb-8 text-sm text-slate-400">For contributors: how the engine normalizes requests across all 8
+          frameworks.</p>
+
+        <div class="data-table-container mb-10">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Framework</th>
+                <th>Request Object</th>
+                <th>Adapter Strategy</th>
+              </tr>
+            </thead>
+            <tbody class="text-sm">
+              <tr>
+                <td class="font-bold text-white">Express</td>
+                <td>req (IncomingMessage)</td>
+                <td>Node.js native stream piping.</td>
+              </tr>
+              <tr>
+                <td class="font-bold text-white">Fastify</td>
+                <td>req.raw</td>
+                <td>Extract underlying Node stream.</td>
+              </tr>
+              <tr>
+                <td class="font-bold text-white">Hono</td>
+                <td>c.req.raw.body</td>
+                <td>Web-standard ReadableStream bridge.</td>
+              </tr>
+              <tr>
+                <td class="font-bold text-white">Next.js</td>
+                <td>Request (Fetch API)</td>
+                <td>Async iteration over request body.</td>
+              </tr>
+              <tr>
+                <td class="font-bold text-white">Koa</td>
+                <td>ctx.req</td>
+                <td>Standard Koa context wrapping.</td>
+              </tr>
+              <tr>
+                <td class="font-bold text-white">Elysia</td>
+                <td>context.request</td>
+                <td>Bun internal stream processor.</td>
+              </tr>
+              <tr>
+                <td class="font-bold text-white">H3 / Nuxt</td>
+                <td>event.node.req</td>
+                <td>Nitro normalization layer.</td>
+              </tr>
+              <tr>
+                <td class="font-bold text-white">Raw Node</td>
+                <td>http.IncomingMessage</td>
+                <td>Zero-dependency listener bridge.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4 class="text-white font-bold mb-4">StorageAdapter Interface</h4>
+        <div class="data-table-container mb-12">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Arguments</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody class="text-sm">
+              <tr>
+                <td class="font-mono text-blue-400">putObject()</td>
+                <td>path, stream</td>
+                <td>Atomic write of a file stream to the provider.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">finalize()</td>
+                <td>sessionId, storageRef</td>
+                <td>Reassemble chunks into the final binary object.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">deleteObject()</td>
+                <td>storageRef</td>
+                <td>Permanently remove a file. Must not throw on missing paths.</td>
+              </tr>
+              <tr>
+                <td class="font-mono text-blue-400">getSignedUrl()</td>
+                <td>storageRef, expiresIn</td>
+                <td>Generate a time-limited access URL (cloud only).</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Internal Utility Library</h2>
+        <p class="mb-8 text-sm text-slate-400">The server library exposes several low-level validators and detectors
+          useful for custom upload logic.</p>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="p-5 bg-slate-900 border border-slate-800 rounded-2xl">
+            <h4 class="text-cyan-400 font-bold mb-3 text-sm uppercase">Media Detection</h4>
+            <div class="space-y-4">
+              <div class="p-3 bg-slate-950/50 rounded-lg border border-slate-800">
+                <span class="text-blue-400 font-mono text-[10px]">detectKind(mimetype)</span>
+                <p class="text-[10px] text-slate-500 mt-1">Returns 'image', 'video', 'audio', or 'document'.</p>
+              </div>
+              <div class="p-3 bg-slate-950/50 rounded-lg border border-slate-800">
+                <span class="text-blue-400 font-mono text-[10px]">MultipartParser.detectMimeType(buffer)</span>
+                <p class="text-[10px] text-slate-500 mt-1">Inspects magic bytes to verify actual file signature.</p>
+              </div>
+            </div>
+          </div>
+          <div class="p-5 bg-slate-900 border border-slate-800 rounded-2xl">
+            <h4 class="text-orange-400 font-bold mb-3 text-sm uppercase">Validation Utils</h4>
+            <div class="space-y-4">
+              <div class="p-3 bg-slate-950/50 rounded-lg border border-slate-800">
+                <span class="text-blue-400 font-mono text-[10px]">assertWithinLimit(size, max, label)</span>
+                <p class="text-[10px] text-slate-500 mt-1">Throws a 413 ValidationError if limit is exceeded.</p>
+              </div>
+              <div class="p-3 bg-slate-950/50 rounded-lg border border-slate-800">
+                <span class="text-blue-400 font-mono text-[10px]">assertKindAllowed(kind, config)</span>
+                <p class="text-[10px] text-slate-500 mt-1">Verifies if the detected media kind is in the allowed list.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+  <footer class="mt-40 py-5 border-t border-slate-900 text-xs text-slate-600 text-center">
+    <p>&copy; 2026 UploadMedia Documentation. Managed-Backend ecosystem.</p>
+  </footer>
+  <script src="js/main.js"></script>
+</body>
+
+</html>

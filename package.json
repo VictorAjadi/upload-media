@@ -1,0 +1,11 @@
+{
+  "name": "@upload-media-monorepo",
+  "description": "A monorepo for @upload-media/client and @upload-media/server - The Ultimate, Enterprise-Grade Media Upload & Processing Engine that helps you build a robust and scalable media upload system.",
+  "author": "<[victorajadi2004@gmail.com]> Victor Ajadi",
+  "license": "MIT",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ]
+}

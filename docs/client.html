@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Client Manual | UploadMedia Documentation</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body class="bg-slate-950 text-slate-300 antialiased selection:bg-blue-500/30 selection:text-white">
+
+    <!-- Sidebar -->
+    <aside
+        class="sidebar fixed left-0 top-0 h-screen w-72 bg-slate-900 border-r border-slate-800 hidden lg:flex flex-col z-50">
+        <div class="p-5 pb-4">
+            <div class="flex items-center gap-3 mb-8 text-white font-bold text-xl uppercase tracking-tighter">
+                <i data-lucide="upload-cloud" class="text-blue-500 w-8 h-8"></i>
+                <span>UploadMedia</span>
+            </div>
+        </div>
+        <nav class="flex-1 overflow-y-auto px-6 py-4 space-y-8">
+            <div>
+                <p class="text-xs font-bold text-slate-600 uppercase tracking-widest mb-4">Pages</p>
+                <div class="space-y-1 text-sm">
+                    <a href="index.html" class="sidebar-link"><i data-lucide="book-open"></i> Introduction</a>
+                    <a href="server.html" class="sidebar-link"><i data-lucide="server"></i> Server Manual</a>
+                    <a href="client.html" class="sidebar-link active"><i data-lucide="mouse-pointer"></i> Client
+                        Manual</a>
+                    <a href="api.html" class="sidebar-link"><i data-lucide="code-2"></i> API Reference</a>
+                </div>
+            </div>
+            <div>
+                <p class="text-xs font-bold text-slate-600 uppercase tracking-widest mb-4">On this page</p>
+                <div class="space-y-1 text-sm">
+                    <a href="#vanilla" class="sidebar-link"><i data-lucide="file-code"></i> Vanilla Usage</a>
+                    <a href="#actions" class="sidebar-link"><i data-lucide="zap"></i> Actions API</a>
+                    <a href="#state" class="sidebar-link"><i data-lucide="activity"></i> State Store</a>
+                    <a href="#hooks" class="sidebar-link"><i data-lucide="hook"></i> Transformation Hooks</a>
+                    <a href="#worker" class="sidebar-link"><i data-lucide="radio"></i> Worker Protocol</a>
+                    <a href="#wasm" class="sidebar-link"><i data-lucide="scissors"></i> WASM Tools</a>
+                    <a href="#config" class="sidebar-link"><i data-lucide="settings-2"></i> Configuration</a>
+                </div>
+            </div>
+
+            <div>
+                <p class="text-xs font-bold text-slate-600 uppercase tracking-widest mb-4">Help & Support</p>
+                <div class="space-y-1 text-sm">
+                    <a href="index.html#faq" class="sidebar-link"><i data-lucide="help-circle"></i> FAQ</a>
+                    <a href="index.html#troubleshooting" class="sidebar-link"><i data-lucide="zap"></i>
+                        Troubleshooting</a>
+                </div>
+            </div>
+        </nav>
+    </aside>
+
+    <main class="lg:ml-72 min-h-screen">
+        <div class="max-w-4xl mx-auto px-8 py-10 pb-40">
+            <header class="mb-16">
+                <h1 class="text-4xl font-black text-white mb-4">Client-Side Manual</h1>
+                <p class="text-lg text-slate-400 max-w-2xl">Worker-powered upload orchestration, state management, and
+                    browser-side media processing.</p>
+            </header>
+
+            <!-- ============================================== -->
+            <!-- 1. VANILLA USAGE (Full Example)                -->
+            <!-- ============================================== -->
+            <section id="vanilla" class="mb-16">
+                <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Pure HTML & Vanilla JS</h2>
+                <p class="mb-8 text-sm text-slate-400">Zero frameworks needed. Use CDN import maps to resolve all
+                    dependencies directly in the browser.</p>
+
+                <div class="code-container">
+                    <div class="code-header">index.html (Complete Working Example)</div>
+                    <pre>
+&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+  <span class="token-comment">&lt;!-- CDN Import Map --&gt;</span>
+  &lt;script type="importmap"&gt;
+  {
+    "imports": {
+      "@upload-media/client": "https://unpkg.com/@upload-media/client@latest/dist/index.mjs",
+      "zustand/vanilla": "https://unpkg.com/zustand@latest/esm/vanilla.mjs",
+      "zustand/middleware": "https://unpkg.com/zustand@latest/esm/middleware.mjs",
+      "immer": "https://unpkg.com/immer@latest/dist/immer.mjs",
+      "@ffmpeg/ffmpeg": "https://unpkg.com/@ffmpeg/ffmpeg@latest/dist/esm/index.js",
+      "@ffmpeg/util": "https://unpkg.com/@ffmpeg/util@latest/dist/esm/index.js"
+    }
+  }
+  &lt;/script&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  &lt;input type="file" id="fileInput" multiple /&gt;
+  &lt;button id="uploadBtn"&gt;Upload&lt;/button&gt;
+  &lt;div id="progress"&gt;&lt;/div&gt;
+
+  &lt;script type="module"&gt;
+    <span class="token-keyword">import</span> { UploadManager, useUploadProgress } <span class="token-keyword">from</span> <span class="token-string">'@upload-media/client'</span>;
+
+    <span class="token-keyword">const</span> manager = <span class="token-keyword">new</span> <span class="token-function">UploadManager</span>({
+      workerUrl: <span class="token-string">'/upload.worker.js'</span>
+    });
+
+    document.<span class="token-function">getElementById</span>(<span class="token-string">'uploadBtn'</span>).<span class="token-function">addEventListener</span>(<span class="token-string">'click'</span>, () => {
+      <span class="token-keyword">const</span> files = Array.<span class="token-function">from</span>(document.<span class="token-function">getElementById</span>(<span class="token-string">'fileInput'</span>).files);
+      <span class="token-keyword">if</span> (!files.length) <span class="token-keyword">return</span>;
+
+      manager.<span class="token-function">upload</span>(files, [<span class="token-string">'video'</span>], {
+        uploadId: <span class="token-string">`session_${Date.now()}`</span>,
+        endpoint: <span class="token-string">'/api/upload'</span>
+      });
+    });
+
+    useUploadProgress.<span class="token-function">subscribe</span>((state) => {
+      document.<span class="token-function">getElementById</span>(<span class="token-string">'progress'</span>).innerHTML =
+        state.uploads.<span class="token-function">map</span>(u => <span class="token-string">`
+          &lt;div&gt;
+            &lt;p&gt;${u.uploadId}: ${u.overallProgress}%&lt;/p&gt;
+            &lt;progress value="${u.overallProgress}" max="100"&gt;&lt;/progress&gt;
+          &lt;/div&gt;
+        `</span>).<span class="token-function">join</span>(<span class="token-string">''</span>);
+    });
+  &lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</pre>
+                </div>
+            </section>
+
+            <!-- ============================================== -->
+            <!-- 2. ACTIONS API                                 -->
+            <!-- ============================================== -->
+            <section id="actions" class="mb-16">
+                <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Upload Actions API</h2>
+
+                <!-- initializeUpload payload -->
+                <h4 class="text-white font-bold mb-4">initializeUpload Payload</h4>
+                <div class="data-table-container mb-10">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Key</th>
+                                <th>Type</th>
+                                <th>Required</th>
+                                <th>Description</th>
+                            </tr>
+                        </thead>
+                        <tbody class="text-sm">
+                            <tr>
+                                <td>uploadId</td>
+                                <td>string</td>
+                                <td>Yes</td>
+                                <td>Unique session identifier.</td>
+                            </tr>
+                            <tr>
+                                <td>blobs</td>
+                                <td>File[]</td>
+                                <td>Yes</td>
+                                <td>Array of File/Blob objects.</td>
+                            </tr>
+                            <tr>
+                                <td>endpoint</td>
+                                <td>string</td>
+                                <td>Yes</td>
+                                <td>Server URL for chunk ingestion.</td>
+                            </tr>
+                            <tr>
+                                <td>metadata</td>
+                                <td>Config[]</td>
+                                <td>No</td>
+                                <td>Maps blobs to fieldname keys.</td>
+                            </tr>
+                            <tr>
+                                <td>postData</td>
+                                <td>Record</td>
+                                <td>No</td>
+                                <td>Extra form fields sent with every chunk.</td>
+                            </tr>
+                            <tr>
+                                <td>transform</td>
+                                <td>boolean</td>
+                                <td>No</td>
+                                <td>Enable WASM video processing pipeline.</td>
+                            </tr>
+                            <tr>
+                                <td>videoStartTime</td>
+                                <td>number</td>
+                                <td>No</td>
+                                <td>Trim start (seconds). Requires transform: true.</td>
+                            </tr>
+                            <tr>
+                                <td>videoEndTime</td>
+                                <td>number</td>
+                                <td>No</td>
+                                <td>Trim end (seconds). Requires transform: true.</td>
+                            </tr>
+                            <tr>
+                                <td>transformer</td>
+                                <td>object</td>
+                                <td>No</td>
+                                <td>Transformation config (quality, qualities, format).</td>
+                            </tr>
+                            <tr>
+                                <td>transformer.qualities</td>
+                                <td>array</td>
+                                <td>No</td>
+                                <td>Generate multiple variants. e.g. ['high', 'medium', 'low']</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- All action methods -->
+                <h4 class="text-white font-bold mb-4">Available Methods</h4>
+                <div class="data-table-container mb-10">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Method</th>
+                                <th>Arguments</th>
+                                <th>Description</th>
+                            </tr>
+                        </thead>
+                        <tbody class="text-sm">
+                            <tr>
+                                <td class="font-mono text-blue-400">initializeUpload()</td>
+                                <td>UploadPayload</td>
+                                <td>Start a new upload or resume an interrupted one.</td>
+                            </tr>
+                            <tr>
+                                <td class="font-mono text-blue-400">pauseUpload()</td>
+                                <td>uploadId: string</td>
+                                <td>Halt all active network requests for the session.</td>
+                            </tr>
+                            <tr>
+                                <td class="font-mono text-blue-400">resumeUpload()</td>
+                                <td>uploadId: string</td>
+                                <td>Re-trigger the worker chunk loop from last checkpoint.</td>
+                            </tr>
+                            <tr>
+                                <td class="font-mono text-blue-400">cancelUpload()</td>
+                                <td>uploadId: string</td>
+                                <td>Terminate session and purge its IndexedDB data.</td>
+                            </tr>
+                            <tr>
+                                <td class="font-mono text-blue-400">clearUploads()</td>
+                                <td>type: string</td>
+                                <td>Remove 'completed' or 'failed' uploads from state.</td>
+                            </tr>
+                            <tr>
+                                <td class="font-mono text-blue-400">getUpload()</td>
+                                <td>uploadId: string</td>
+                                <td>Retrieve a specific upload session by ID.</td>
+                            </tr>
+                            <tr>
+                                <td class="font-mono text-blue-400">totalProgress</td>
+                                <td>getter</td>
+                                <td>Average overall progress across all active sessions.</td>
+                            </tr>
+                            <tr>
+                                <td class="font-mono text-blue-400">activeUploads</td>
+                                <td>getter</td>
+                                <td>Total count of uploads currently in progress.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- React Hook Example -->
+                <h4 class="text-white font-bold mb-4">React Hook Usage</h4>
+                <div class="code-container">
+                    <pre>
+<span class="token-keyword">import</span> { useUploadActions, useUploadProgress } <span class="token-keyword">from</span> <span class="token-string">'@upload-media/client'</span>;
+
+<span class="token-keyword">const</span> { initializeUpload, pauseUpload, resumeUpload, cancelUpload } = <span class="token-function">useUploadActions</span>();
+<span class="token-keyword">const</span> uploads = <span class="token-function">useUploadProgress</span>(s => s.uploads);
+
+<span class="token-comment">// Resume a previously interrupted session</span>
+<span class="token-function">resumeUpload</span>(<span class="token-string">'session_abc123'</span>);</pre>
+                </div>
+            </section>
+
+            <!-- ============================================== -->
+            <!-- 3. ADVANCED WASM TOOLS                         -->
+            <!-- ============================================== -->
+            <section id="wasm" class="mb-16">
+                <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Advanced WASM Tools
+                    (FFmpeg)</h2>
+                <p class="mb-10 text-sm text-slate-400">Trim and process media in-browser before upload. Reduces server
+                    load and improves UX.
+                    <span class="text-red-400 block mt-2 text-xs font-semibold">⚠️ Requires Cross-Origin Isolation
+                        (COOP/COEP) headers.</span>
+                </p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-10">
+                    <div class="card p-6 bg-slate-900 border border-slate-800 rounded-3xl">
+                        <h4 class="text-xs font-black text-blue-400 uppercase tracking-widest mb-6">Video & Audio
+                            Trimmers</h4>
+                        <div class="code-container m-0">
+                            <pre class="text-[11px]">
+<span class="token-keyword">import</span> { useVideoTrimmer, useAudioTrimmer } <span class="token-keyword">from</span> <span class="token-string">'@upload-media/client'</span>;
+
+<span class="token-comment">// 1. Video Trimming</span>
+<span class="token-keyword">const</span> { trimVideo } = <span class="token-function">useVideoTrimmer</span>();
+<span class="token-keyword">const</span> video = <span class="token-keyword">await</span> <span class="token-function">trimVideo</span>(file, { 
+  startTime: <span class="token-number">10</span>, 
+  endTime: <span class="token-number">60</span>, 
+  quality: <span class="token-string">'high'</span> 
+});
+
+<span class="token-comment">// 2. Audio Trimming</span>
+<span class="token-keyword">const</span> { trimAudio } = <span class="token-function">useAudioTrimmer</span>();
+<span class="token-keyword">const</span> audio = <span class="token-keyword">await</span> <span class="token-function">trimAudio</span>(file, {
+  startTime: <span class="token-number">0</span>,
+  endTime: <span class="token-number">30</span>,
+  quality: <span class="token-string">'medium'</span>
+});</pre>
+                        </div>
+                    </div>
+
+                    <div class="card p-6 bg-slate-900 border border-slate-800 rounded-3xl">
+                        <h4 class="text-xs font-black text-purple-400 uppercase tracking-widest mb-6">One-Pass
+                            Processing</h4>
+                        <div class="code-container m-0">
+                            <pre class="text-[11px]">
+<span class="token-function">initializeUpload</span>({
+  blobs: [videoFile],
+  transform: <span class="token-keyword">true</span>,
+  videoStartTime: <span class="token-number">10</span>,
+  videoEndTime: <span class="token-number">60</span>,
+  quality: <span class="token-string">'medium'</span>,
+  endpoint: <span class="token-string">'/api/upload'</span>
+});</pre>
+                        </div>
+                        <p class="text-[10px] text-slate-500 mt-6 leading-relaxed italic">
+                            The internal engine automatically selects the correct trimmer based on file MIME type.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================================== -->
+            <!-- 4. TRANSFORMATION HOOKS                       -->
+            <!-- ============================================== -->
+            <section id="hooks" class="mb-16">
+                <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Transformation Hooks</h2>
+                <p class="mb-10 text-sm text-slate-400 leading-relaxed">The transformation pipeline is fully extensible.
+                    You can inject custom logic like watermarking or document encryption before the upload starts.</p>
+
+                <div class="space-y-8">
+                    <div class="card p-6 bg-slate-900/50 border border-slate-800 rounded-3xl">
+                        <h4 class="text-xs font-black text-white uppercase tracking-widest mb-6">Custom File Mutator
+                        </h4>
+                        <div class="code-container m-0">
+                            <pre class="text-[11px]">
+<span class="token-function">setUploadMediaConfig</span>({
+  <span class="token-keyword">hooks</span>: {
+    <span class="token-function">beforeProcess</span>: <span class="token-keyword">async</span> (file) => {
+      <span class="token-comment">// Example: Adding a Watermark Layer</span>
+      <span class="token-keyword">if</span> (file.type.<span class="token-function">startsWith</span>(<span class="token-string">'image/'</span>)) {
+        <span class="token-keyword">return await</span> <span class="token-function">applyWatermark</span>(file, <span class="token-string">'© 2026'</span>);
+      }
+      <span class="token-keyword">return</span> file;
+    }
+  }
+});</pre>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================================== -->
+            <!-- 5. STATE STORE                                 -->
+            <!-- ============================================== -->
+            <section id="state" class="mb-16">
+                <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">The State Engine</h2>
+                <p class="mb-10 text-sm text-slate-400">A reactive Zustand store powered by Immer for zero-allocation
+                    state updates.</p>
+
+                <div class="data-table-container">
+                    <table class="data-table text-xs">
+                        <thead>
+                            <tr>
+                                <th>Property</th>
+                                <th>Type</th>
+                                <th>Description</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="text-blue-400 font-mono">uploads</td>
+                                <td>UploadSession[]</td>
+                                <td>Active and historical sessions.</td>
+                            </tr>
+                            <tr>
+                                <td class="text-blue-400 font-mono">overallProgress</td>
+                                <td>number</td>
+                                <td>Weighted total completion (0-100).</td>
+                            </tr>
+                            <tr>
+                                <td class="text-blue-400 font-mono">speed</td>
+                                <td>number</td>
+                                <td>Current throughput in Bytes/sec.</td>
+                            </tr>
+                            <tr>
+                                <td class="text-blue-400 font-mono">status</td>
+                                <td>string</td>
+                                <td>'uploading' | 'paused' | 'failed' | 'completed'.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- ============================================== -->
+            <!-- 6. GLOBAL CONFIGURATION                        -->
+            <!-- ============================================== -->
+            <section id="config" class="mb-16">
+                <h2 class="text-xl font-bold text-white mb-6 pb-3 border-b border-slate-800">Global Configuration</h2>
+                <p class="mb-10 text-sm text-slate-400 leading-relaxed">Override engine behavior for all upload sessions
+                    via <code>setUploadMediaConfig()</code>.</p>
+
+                <div class="card p-6 bg-slate-900 border border-slate-800 rounded-3xl">
+                    <div class="code-container m-0">
+                        <pre class="text-[11px]">
+<span class="token-keyword">import</span> { setUploadMediaConfig } <span class="token-keyword">from</span> <span class="token-string">'@upload-media/client'</span>;
+
+<span class="token-function">setUploadMediaConfig</span>({
+  maxConcurrent: <span class="token-number">5</span>,
+  maxRetries: <span class="token-number">10</span>,
+  chunkSizes: {
+    video: <span class="token-number">5 * 1024 * 1024</span>,   <span class="token-comment">// 5MB for videos</span>
+    image: <span class="token-number">1 * 1024 * 1024</span>,   <span class="token-comment">// 1MB for images</span>
+    default: <span class="token-number">2 * 1024 * 1024</span>  <span class="token-comment">// 2MB fallback</span>
+  }
+});</pre>
+                    </div>
+                </div>
+            </section>
+
+        </div>
+    </main>
+    <footer class="mt-40 py-5 border-t border-slate-900 text-xs text-slate-600 text-center">
+        <p>&copy; 2026 UploadMedia Documentation. Managed-Backend ecosystem.</p>
+    </footer>
+    <script src="js/main.js"></script>
+</body>
+
+</html>

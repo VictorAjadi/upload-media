@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UploadMedia | Professional Engine Documentation</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body class="bg-slate-950 text-slate-300 antialiased selection:bg-blue-500/30 selection:text-white">
+
+    <!-- Sidebar Navigation -->
+    <aside
+        class="sidebar fixed left-0 top-0 h-screen w-72 bg-slate-900 border-r border-slate-800 hidden lg:flex flex-col z-50">
+        <div class="p-5 pb-4">
+            <div class="flex items-center gap-3 mb-8 text-white font-bold text-xl uppercase tracking-tighter">
+                <i data-lucide="upload-cloud" class="text-blue-500 w-8 h-8"></i>
+                <span>UploadMedia</span>
+            </div>
+        </div>
+
+        <nav class="flex-1 overflow-y-auto px-6 py-4 space-y-8">
+            <div>
+                <p class="text-xs font-bold text-slate-600 uppercase tracking-widest mb-4">Core Essentials</p>
+                <div class="space-y-1 text-sm">
+                    <a href="index.html" class="sidebar-link active"><i data-lucide="book-open"></i> Introduction</a>
+                    <a href="server.html" class="sidebar-link"><i data-lucide="server"></i> Server Manual</a>
+                    <a href="client.html" class="sidebar-link"><i data-lucide="mouse-pointer"></i> Client Manual</a>
+                    <a href="api.html" class="sidebar-link"><i data-lucide="code-2"></i> API Reference</a>
+                </div>
+            </div>
+
+            <div>
+                <p class="text-xs font-bold text-slate-600 uppercase tracking-widest mb-4">Help & Support</p>
+                <div class="space-y-1 text-sm">
+                    <a href="#faq" class="sidebar-link"><i data-lucide="help-circle"></i> FAQ</a>
+                    <a href="#troubleshooting" class="sidebar-link"><i data-lucide="zap"></i> Troubleshooting</a>
+                </div>
+            </div>
+        </nav>
+    </aside>
+
+    <main class="lg:ml-72 min-h-screen">
+        <div class="max-w-4xl mx-auto px-8 py-10 pb-40">
+            <h1 class="text-4xl font-black text-white leading-tight mb-8">Professional Media <br> <span
+                    class="text-blue-500">Infrastructure.</span></h1>
+
+            <section id="introduction" class="mt-10">
+                <h2 class="text-xl font-bold mb-6">Introduction</h2>
+                <p class="text-lg leading-relaxed mb-8">
+                    UploadMedia is an enterprise-grade ecosystem for handling complex file upload requirements. It
+                    provides a bridge between raw multipart binary streams and high-level media management, ensuring
+                    that massive assets can be ingested safely, processed efficiently, and served reliably.
+                </p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-5 my-16">
+                    <div class="card p-5 bg-slate-900 border border-slate-800 rounded-3xl">
+                        <div class="w-12 h-12 bg-blue-500/20 rounded-2xl flex items-center justify-center mb-6">
+                            <i data-lucide="shield-check" class="text-blue-400"></i>
+                        </div>
+                        <h4 class="text-xl font-bold text-white mb-4">Atomic & Resumable</h4>
+                        <p class="text-sm text-slate-500">Switch between direct atomic uploads for small files and
+                            chunk-based resumable uploads for gigabyte-scale assets.</p>
+                    </div>
+                    <div class="card p-5 bg-slate-900 border border-slate-800 rounded-3xl">
+                        <div class="w-12 h-12 bg-emerald-500/20 rounded-2xl flex items-center justify-center mb-6">
+                            <i data-lucide="play-circle" class="text-emerald-400"></i>
+                        </div>
+                        <h4 class="text-xl font-bold text-white mb-4">Intelligent Serving</h4>
+                        <p class="text-sm text-slate-500">Built-in support for HTTP Range requests, allowing your users to seek through 4K videos with zero configuration.</p>
+                    </div>
+                    <div class="card p-5 bg-slate-900 border border-slate-800 rounded-3xl">
+                        <div class="w-12 h-12 bg-purple-500/20 rounded-2xl flex items-center justify-center mb-6">
+                            <i data-lucide="cpu" class="text-purple-400"></i>
+                        </div>
+                        <h4 class="text-xl font-bold text-white mb-4">WASM Transformation</h4>
+                        <p class="text-sm text-slate-500">Process media directly in the browser. Trim, transcode, and resize video/audio before it ever hits your server.</p>
+                    </div>
+                    <div class="card p-5 bg-slate-900 border border-slate-800 rounded-3xl">
+                        <div class="w-12 h-12 bg-amber-500/20 rounded-2xl flex items-center justify-center mb-6">
+                            <i data-lucide="database" class="w-12 h-12 text-amber-400"></i>
+                        </div>
+                        <h4 class="text-xl font-bold text-white mb-4">Database Orchestrated</h4>
+                        <p class="text-sm text-slate-500">Seamlessly syncs with MongoDB or SQL to track every byte, ensuring 100% reliability in high-traffic environments.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section id="quick-start">
+                <h2 class="text-xl font-bold mb-6">Ready for Any Framework</h2>
+                <p class="mb-10">We handle the plumbing, you handle the business logic. Native adapters for 8 different
+                    environments mean you can deploy anywhere.</p>
+
+                <div class="flex flex-wrap gap-4">
+                    <span class="badge badge-blue">Express</span>
+                    <span class="badge badge-blue">Next.js</span>
+                    <span class="badge badge-blue">Hono</span>
+                    <span class="badge badge-blue">Fastify</span>
+                    <span class="badge badge-blue">Elysia</span>
+                    <span class="badge badge-blue">Koa</span>
+                    <span class="badge badge-blue">H3</span>
+                    <span class="badge badge-blue">Raw Node</span>
+                </div>
+            </section>
+
+            <section id="getting-started" class="mb-16">
+                <h2 class="text-xl font-bold text-white mb-10 pb-4 border-b border-slate-900">Getting Started</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
+                    <div class="space-y-6">
+                        <h4 class="text-xs font-black text-blue-500 uppercase tracking-tighter">I. Framework
+                            Installation</h4>
+                        <p class="text-sm text-slate-500">For React, Vue, Next.js, or Express environments, install
+                            via your favorite package manager.</p>
+                        <div class="code-container">
+                            <pre>
+npm install @upload-media/client @upload-media/server
+</pre>
+                        </div>
+                    </div>
+                    <div class="space-y-6">
+                        <h4 class="text-xs font-black text-blue-500 uppercase tracking-tighter">II. Vanilla CDN
+                            Resolution</h4>
+                        <p class="text-sm text-slate-500">For pure HTML projects, use the Unpkg CDN to resolve
+                            dependencies without local node_modules.</p>
+                        <div class="code-container">
+                            <pre>
+<span class="token-comment">&lt;!-- Add to &lt;head&gt; --&gt;</span>
+&lt;script type="importmap"&gt;
+{
+  "imports": {
+    "@upload-media/client": "https://unpkg.com/@upload-media/client@latest/dist/index.mjs",
+    "zustand/vanilla": "https://unpkg.com/zustand@latest/esm/vanilla.mjs",
+    "immer": "https://unpkg.com/immer@latest/dist/immer.mjs"
+  }
+}
+&lt;/script&gt;
+</pre>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================================== -->
+            <!-- 3. FAQ                                         -->
+            <!-- ============================================== -->
+            <section id="faq" class="mb-20">
+                <h2 class="text-xl font-bold text-white mb-10 pb-4 border-b border-slate-900">Frequently Asked Questions
+                </h2>
+                <div class="space-y-8">
+                    <div class="faq-item">
+                        <h4 class="text-sm font-bold text-white mb-2">How does the system handle gigabyte-scale files?
+                        </h4>
+                        <p class="text-sm text-slate-500 leading-relaxed">
+                            We use <strong>Chunked Orchestration</strong>. Files are sliced into 2MB-5MB parts in the
+                            browser.
+                            If a connection drops, only the current chunk is lost. The worker resumes from the last
+                            successfully acknowledged chunk stored in IndexedDB.
+                        </p>
+                    </div>
+                    <div class="faq-item">
+                        <h4 class="text-sm font-bold text-white mb-2">Are COOP/COEP headers mandatory?</h4>
+                        <p class="text-sm text-slate-500 leading-relaxed">
+                            Only if you enable <strong>Media Transformation (WASM)</strong>. FFmpeg.wasm requires
+                            <code>SharedArrayBuffer</code>, which is only available in cross-origin isolated contexts.
+                            Standard uploads work without these headers.
+                        </p>
+                    </div>
+                    <div class="faq-item">
+                        <h4 class="text-sm font-bold text-white mb-2">Does this work with Cloudflare R2 or MinIO?</h4>
+                        <p class="text-sm text-slate-500 leading-relaxed">
+                            Yes. The <code>S3StorageAdapter</code> is fully compatible with any S3-compliant API.
+                            Just provide the custom <code>endpoint</code> and enable <code>forcePathStyle</code> for
+                            MinIO.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ============================================== -->
+            <!-- 4. TROUBLESHOOTING                             -->
+            <!-- ============================================== -->
+            <section id="troubleshooting" class="mb-16">
+                <h2 class="text-xl font-bold text-white mb-10 pb-4 border-b border-slate-800">Troubleshooting</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="p-6 bg-red-500/5 border border-red-500/20 rounded-2xl">
+                        <h4 class="text-red-400 font-bold mb-3 text-xs flex items-center gap-2">
+                            <i data-lucide="alert-triangle" class="w-3 h-3"></i> 413 Payload Too Large
+                        </h4>
+                        <p class="text-sm text-slate-500 mb-4">The server's body-parser or proxy (Nginx) is blocking the
+                            chunk.</p>
+                        <ul class="text-sm text-slate-400 list-disc list-inside space-y-1">
+                            <li>Set <code>client_max_body_size</code> to 0 in Nginx.</li>
+                            <li>Increase <code>maxFieldSize</code> in Engine config.</li>
+                        </ul>
+                    </div>
+                    <div class="p-6 bg-orange-500/5 border border-orange-500/20 rounded-2xl">
+                        <h4 class="text-orange-400 font-bold mb-3 text-xs flex items-center gap-2">
+                            <i data-lucide="info" class="w-3 h-3"></i> SharedArrayBuffer Error
+                        </h4>
+                        <p class="text-sm text-slate-500 mb-4">Transformation fails with "SharedArrayBuffer is not
+                            defined".</p>
+                        <ul class="text-sm text-slate-400 list-disc list-inside space-y-1">
+                            <li>Check Cross-Origin-Opener-Policy: same-origin</li>
+                            <li>Check Cross-Origin-Embedder-Policy: require-corp</li>
+                        </ul>
+                    </div>
+                    <div class="p-6 bg-slate-900 border border-slate-800 rounded-2xl">
+                        <h4 class="text-blue-400 font-bold mb-3 text-xs flex items-center gap-2">
+                            <i data-lucide="database" class="w-3 h-3"></i> Manifest Sync Error
+                        </h4>
+                        <p class="text-sm text-slate-500 mb-4">IndexedDB indicates a manifest mismatch during resume.
+                        </p>
+                        <ul class="text-sm text-slate-400 list-disc list-inside space-y-1">
+                            <li>Clear browser storage and retry.</li>
+                            <li>Ensure <code>uploadId</code> is unique per session.</li>
+                        </ul>
+                    </div>
+                    <div class="p-6 bg-slate-900 border border-slate-800 rounded-2xl">
+                        <h4 class="text-slate-400 font-bold mb-3 text-xs flex items-center gap-2">
+                            <i data-lucide="refresh-cw" class="w-3 h-3"></i> Slow Chunk Recovery
+                        </h4>
+                        <p class="text-sm text-slate-500 mb-4">Resuming takes too long to verify existing chunks at
+                            scale.</p>
+                        <ul class="text-sm text-slate-400 list-disc list-inside space-y-2">
+                            <li><strong>Integrate Cache:</strong> Use <code>@mongoose-performance-cache</code> for
+                                MongoDB repos to achieve 1000+ RPS with zero-allocation hashing.</li>
+                            <li><strong>Custom Hooks:</strong> Use the <code>afterPutObject</code> and
+                                <code>beforeFindFiles</code> hooks to implement Redis caching manually.</li>
+                            <li><strong>Pre/Post Logic:</strong> Implement pre-transform or post-save logic directly in
+                                your Database Repository or via Engine Hooks.</li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+        </div>
+    </main>
+    <footer class="mt-40 py-5 border-t border-slate-900 text-xs text-slate-600 text-center">
+        <p>&copy; 2026 UploadMedia Documentation. Managed-Backend ecosystem.</p>
+    </footer>
+    <script src="js/main.js"></script>
+</body>
+
+</html>

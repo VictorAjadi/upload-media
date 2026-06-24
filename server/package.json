@@ -1,0 +1,33 @@
+{
+  "name": "@upload-media/server",
+  "version": "1.0.0",
+  "description": "Framework-agnostic robust media upload backend",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch"
+  },
+  "homepage": "https://github.com/VictorAjadi/upload-media",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VictorAjadi/upload-media"
+  },
+  "keywords": [
+    "upload-media",
+    "file-upload",
+    "media-upload"
+  ],
+  "author": "<victorajadi2004@gmail.com> Victor Ajadi",
+  "license": "MIT",
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "mongoose": "^7.8.9"
+  },
+  "devDependencies": {
+    "@types/busboy": "^1.5.3",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}
