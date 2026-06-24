@@ -1,8 +1,8 @@
-# @upload-media/server
+# upload-media-server
 
 🛸 **The Ultimate, Enterprise-Grade Media Upload & Processing Engine**
 
-`@upload-media/server` is the definitive backend library for building high-performance file ingestion pipelines. Whether you're building the next YouTube, an Instagram clone, or a secure document portal, this library provides the foundation for reliable, resumable, and highly processed uploads across any Node.js framework.
+`upload-media-server` is the definitive backend library for building high-performance file ingestion pipelines. Whether you're building the next YouTube, an Instagram clone, or a secure document portal, this library provides the foundation for reliable, resumable, and highly processed uploads across any Node.js framework.
 
 ---
 
@@ -83,7 +83,7 @@ import {
   MongooseRepository,
   createExpressAdapter,
   createExpressFileServingMiddleware
-} from '@upload-media/server';
+} from 'upload-media-server';
 import mongoose from 'mongoose';
 
 // ── Storage ──────────────────────────────────────
@@ -286,7 +286,7 @@ app.post('/upload', adapter.wrap(async (req, res) => {
 #### Express
 
 ```typescript
-import { createExpressAdapter } from '@upload-media/server';
+import { createExpressAdapter } from 'upload-media-server';
 
 const adapter = createExpressAdapter();
 
@@ -300,7 +300,7 @@ app.post('/api/upload', adapter.wrap(async (req, res) => {
 
 ```typescript
 import { Hono } from 'hono';
-import { createHonoAdapter } from '@upload-media/server';
+import { createHonoAdapter } from 'upload-media-server';
 
 const app = new Hono();
 const adapter = createHonoAdapter();
@@ -315,7 +315,7 @@ app.post('/api/upload', adapter.wrap(async (c) => {
 
 ```typescript
 import fastify from 'fastify';
-import { createFastifyAdapter } from '@upload-media/server';
+import { createFastifyAdapter } from 'upload-media-server';
 
 const app = fastify();
 const adapter = createFastifyAdapter();
@@ -329,7 +329,7 @@ app.post('/api/upload', adapter.wrap(async (req, reply) => {
 #### Next.js (App Router)
 
 ```typescript
-import { createNextjsAdapter } from '@upload-media/server';
+import { createNextjsAdapter } from 'upload-media-server';
 
 const adapter = createNextjsAdapter();
 
@@ -345,7 +345,7 @@ export async function POST(req: Request) {
 
 ```typescript
 import Koa from 'koa';
-import { createKoaAdapter } from '@upload-media/server';
+import { createKoaAdapter } from 'upload-media-server';
 
 const app = new Koa();
 const adapter = createKoaAdapter();
@@ -360,7 +360,7 @@ app.use(adapter.wrap(async (ctx) => {
 
 ```typescript
 import { Elysia } from 'elysia';
-import { createElysiaAdapter } from '@upload-media/server';
+import { createElysiaAdapter } from 'upload-media-server';
 
 const app = new Elysia();
 const adapter = createElysiaAdapter();
@@ -374,7 +374,7 @@ app.post('/api/upload', adapter.wrap(async ({ request, response }) => {
 #### Nuxt/H3
 
 ```typescript
-import { createH3Adapter } from '@upload-media/server';
+import { createH3Adapter } from 'upload-media-server';
 
 const adapter = createH3Adapter();
 
@@ -388,7 +388,7 @@ export default defineEventHandler(adapter.wrap(async (event) => {
 
 ```typescript
 import http from 'http';
-import { createRawNodeAdapter } from '@upload-media/server';
+import { createRawNodeAdapter } from 'upload-media-server';
 
 const adapter = createRawNodeAdapter();
 
@@ -444,7 +444,7 @@ The S3StorageAdapter streams chunks directly to S3 using the native multipart up
 #### Basic Setup
 
 ```typescript
-import { S3StorageAdapter } from '@upload-media/server';
+import { S3StorageAdapter } from 'upload-media-server';
 
 const s3 = new S3StorageAdapter({
   bucket: 'my-uploads-bucket',
@@ -462,7 +462,7 @@ If you already have a configured `S3Client` instance from `@aws-sdk/client-s3`, 
 
 ```typescript
 import { S3Client } from '@aws-sdk/client-s3';
-import { S3StorageAdapter } from '@upload-media/server';
+import { S3StorageAdapter } from 'upload-media-server';
 
 // Your pre-configured client (with custom retry logic, logging, etc.)
 const s3Client = new S3Client({
@@ -622,7 +622,7 @@ The CloudinaryStorageAdapter uses **Cloudinary's official v2 SDK** and its nativ
 #### Setup
 
 ```typescript
-import { CloudinaryStorageAdapter } from '@upload-media/server';
+import { CloudinaryStorageAdapter } from 'upload-media-server';
 
 const cloudinary = new CloudinaryStorageAdapter({
   cloudName: 'your-cloud-name',
@@ -993,7 +993,7 @@ app.post('/api/save', adapter.wrap(async (req, res) => {
 ### InMemory Repository for Unit Tests
 
 ```typescript
-import { InMemoryRepository, UploadEngine } from '@upload-media/server';
+import { InMemoryRepository, UploadEngine } from 'upload-media-server';
 
 const testEngine = new UploadEngine({
   database: new InMemoryRepository(),
@@ -1061,7 +1061,7 @@ expect(result.status).toBe('success');
 
 ## 📄 License
 
-MIT © 2026 UploadMedia. Distributed as part of the @upload-media ecosystem.
+MIT © 2026 UploadMedia. Distributed as part of the upload-media ecosystem.
 
 ---
 
