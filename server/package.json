@@ -1,13 +1,14 @@
 {
   "name": "upload-media-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Framework-agnostic robust media upload backend",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts",
-    "dev": "tsup src/index.ts --format cjs,esm --dts --watch"
+    "build": "tsup src/index.ts --format cjs,esm --dts --external sharp --external fluent-ffmpeg --external mongoose --external busboy --external ffmpeg-static --external @ffmpeg-installer/ffmpeg --external @ffprobe-installer/ffprobe",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch --external sharp --external fluent-ffmpeg --external mongoose --external busboy --external ffmpeg-static --external @ffmpeg-installer/ffmpeg --external @ffprobe-installer/ffprobe",
+    "postinstall": "node scripts/postinstall.js"
   },
   "homepage": "https://github.com/VictorAjadi/upload-media",
   "repository": {
@@ -22,11 +23,29 @@
   "author": "<victorajadi2004@gmail.com> Victor Ajadi",
   "license": "MIT",
   "dependencies": {
-    "busboy": "^1.6.0",
+    "busboy": "^1.6.0"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.35.2",
+    "fluent-ffmpeg": "^2.1.3",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^1.1.0"
+  },
+  "peerDependencies": {
     "mongoose": "^7.8.9"
+  },
+  "peerDependenciesMeta": {
+    "mongoose": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/busboy": "^1.5.3",
+    "@types/fluent-ffmpeg": "^2.1.28",
+    "@types/sharp": "^0.31.1",
+    "fluent-ffmpeg": "^2.1.3",
+    "mongoose": "^7.8.9",
+    "sharp": "^0.35.2",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0"
   }

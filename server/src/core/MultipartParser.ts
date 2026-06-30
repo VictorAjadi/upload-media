@@ -193,7 +193,10 @@ export class MultipartParser {
         fileStream.on('data', (chunk: Buffer) => {
           size += chunk.length;
           totalSize += chunk.length;
-          chunks.push(chunk);
+
+          // ENSURE chunk is a proper Buffer before pushing
+          const safeChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          chunks.push(safeChunk);
 
           // Progress callback
           options.onProgress?.(totalSize, options.maxTotalSize ?? Infinity);
@@ -211,17 +214,24 @@ export class MultipartParser {
             }
 
             fileInfo.size = size;
+
+            // Ensure we create a proper Buffer from all chunks
             const buffer = Buffer.concat(chunks, size);
 
             // Detect magic bytes (actual file type)
-            if (options.fileValidation?.[fieldname]?.detectMagicBytes) {
+            const fileRule = options.fileValidation?.[fieldname];
+            const wildcardRule = options.fileValidation?.['.*'];
+
+            // Always detect magic bytes if ANY matching rule wants it
+            if ((fileRule?.detectMagicBytes) || (wildcardRule?.detectMagicBytes)) {
               fileInfo.detectedMimetype = this.detectMimeType(buffer);
             }
 
-            // Validate file
-            const rule = options.fileValidation?.[fieldname];
-            if (rule) {
-              this.validateFile(fieldname, fileInfo, buffer, rule);
+            // Validate file - apply specific rule first, then wildcard
+            if (fileRule) {
+              this.validateFile(fieldname, fileInfo, buffer, fileRule);
+            } else if (wildcardRule) {
+              this.validateFile(fieldname, fileInfo, buffer, wildcardRule);
             }
 
             // Hook
@@ -414,22 +424,41 @@ export class MultipartParser {
     }
 
     // MIME type check
-    const mimeToCheck = info.detectedMimetype || info.mimetype;
+    // CRITICAL FIX: Use detected MIME type ONLY if it's not 'application/octet-stream'
+    // When magic byte detection fails, we should trust the provided Content-Type
+    const detectedIsUnknown = !info.detectedMimetype ||
+      info.detectedMimetype === 'application/octet-stream';
 
-    if (rule.allowedMimeTypes && !rule.allowedMimeTypes.includes(mimeToCheck)) {
-      throw new Error(
-        `File "${fieldname}" has unsupported type "${mimeToCheck}". Allowed: ${rule.allowedMimeTypes.join(', ')}`
-      );
+    // If detection returned unknown, trust the original Content-Type header
+    const mimeToCheck = detectedIsUnknown ? info.mimetype : info.detectedMimetype;
+
+    // Only validate allowedMimeTypes if the array is provided and not empty
+    if (rule.allowedMimeTypes && rule.allowedMimeTypes.length > 0) {
+      // Check both detected and original MIME types
+      const detectedMatch = info.detectedMimetype &&
+        rule.allowedMimeTypes.includes(info.detectedMimetype);
+      const originalMatch = rule.allowedMimeTypes.includes(info.mimetype);
+
+      if (!detectedMatch && !originalMatch) {
+        throw new Error(
+          `File "${fieldname}" has unsupported type "${mimeToCheck}". Allowed: ${rule.allowedMimeTypes.join(', ')}`
+        );
+      }
     }
 
-    if (rule.allowedMimePatterns) {
-      const matches = rule.allowedMimePatterns.some((pattern) => {
-        const regex = new RegExp(`^${pattern.replace('*', '.*')}$`);
-        return regex.test(mimeToCheck);
-      });
-      if (!matches) {
+    // Only validate allowedMimePatterns if the array is provided and not empty
+    if (rule.allowedMimePatterns && rule.allowedMimePatterns.length > 0) {
+      const patterns = rule.allowedMimePatterns;
+
+      // Check both detected and original MIME types against patterns
+      const detectedMatch = info.detectedMimetype &&
+        !detectedIsUnknown &&
+        this.matchesMimePattern(info.detectedMimetype, patterns);
+      const originalMatch = this.matchesMimePattern(info.mimetype, patterns);
+
+      if (!detectedMatch && !originalMatch) {
         throw new Error(
-          `File "${fieldname}" type does not match allowed patterns: ${rule.allowedMimePatterns.join(', ')}`
+          `File "${fieldname}" type "${mimeToCheck}" does not match allowed patterns: ${patterns.join(', ')}`
         );
       }
     }
@@ -441,15 +470,43 @@ export class MultipartParser {
   }
 
   /**
+   * Helper method to check if a MIME type matches any of the given patterns
+   */
+  private static matchesMimePattern(mimeType: string, patterns: string[]): boolean {
+    return patterns.some((pattern) => {
+      // Handle multiple patterns separated by |
+      const subPatterns = pattern.split('|');
+      return subPatterns.some((singlePattern) => {
+        const regexPattern = singlePattern.trim()
+          .replace(/\*/g, '.*')
+          .replace(/\?/g, '.');
+        const regex = new RegExp(`^${regexPattern}$`);
+        return regex.test(mimeType);
+      });
+    });
+  }
+
+  /**
    * Detect MIME type from magic bytes.
    * Returns detected MIME type or 'application/octet-stream' if unknown.
+   * 
+   * This method now handles both Buffer and Uint8Array inputs safely.
    */
-  private static detectMimeType(buffer: Buffer): string {
-    if (buffer.length < 4) return 'application/octet-stream';
+  private static detectMimeType(buffer: Buffer | Uint8Array): string {
+    // Ensure we have a proper Buffer with all Buffer methods available
+    const safeBuffer: Buffer = Buffer.isBuffer(buffer)
+      ? buffer
+      : Buffer.from(buffer);
+
+    if (safeBuffer.length < 4) return 'application/octet-stream';
 
     for (const [_, { signature, mimeType }] of Object.entries(MAGIC_BYTES)) {
-      if (buffer.subarray(0, signature.length).equals(signature)) {
-        return mimeType;
+      // Compare first N bytes
+      if (safeBuffer.length >= signature.length) {
+        const prefix = safeBuffer.subarray(0, signature.length);
+        if (prefix.equals(signature)) {
+          return mimeType;
+        }
       }
     }
 

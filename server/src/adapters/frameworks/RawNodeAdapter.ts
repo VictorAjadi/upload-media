@@ -59,6 +59,10 @@ class RawNodeNormalizedResponse implements NormalizedResponse {
     return this;
   }
 
+  end(): void {
+    this.res.end();
+  }
+
   async pipeFrom(stream: Readable): Promise<void> {
     this.res.setHeader('Content-Type', 'application/octet-stream');
     return new Promise<void>((resolve, reject) => {

@@ -82,13 +82,151 @@ interface UploadHooks {
 }
 
 type MediaKind = 'image' | 'video' | 'audio' | 'document' | 'unknown';
-type Quality = 'high' | 'medium' | 'low';
+type ResolutionLabel = '2160p' | '4k' | '1440p' | '2k' | '1080p' | '720p' | '540p' | '480p' | '360p' | '240p' | '144p';
+type Quality = 'high' | 'medium' | 'low' | number;
+interface QualityConfig {
+    id: string;
+    label: string;
+    quality?: Quality;
+    resolution?: string;
+    videoBitrate?: string;
+    audioBitrate?: string;
+    width?: number;
+    height?: number;
+    codec?: string;
+    maxDimension?: number;
+    format?: string;
+    crf?: number;
+}
+interface VideoQualityConfig extends QualityConfig {
+    resolution?: ResolutionLabel | string;
+    crf?: number;
+    videoBitrate?: string;
+    audioBitrate?: string;
+    codec?: string;
+    preset?: ResolvedQuality['preset'];
+    format?: string;
+}
+interface ImageProcessingConfig {
+    quality?: Quality;
+    qualityConfig?: QualityConfig;
+    qualityConfigs?: QualityConfig[];
+    format?: string;
+    width?: number;
+    height?: number;
+}
+interface VideoProcessingConfig {
+    quality?: Quality;
+    qualityConfig?: QualityConfig;
+    qualityConfigs?: QualityConfig[];
+    format?: string;
+    startTime?: number;
+    endTime?: number;
+    mute?: boolean;
+    videoBitrate?: string;
+    audioBitrate?: string;
+    resolution?: string;
+    codec?: string;
+    generateThumbnail?: boolean;
+    thumbnailTimeSeconds?: number;
+}
+interface AudioProcessingConfig {
+    quality?: Quality;
+    qualityConfig?: QualityConfig;
+    qualityConfigs?: QualityConfig[];
+    format?: string;
+    startTime?: number;
+    endTime?: number;
+    audioBitrate?: string;
+}
+interface ProcessingResult {
+    /** Primary output buffer (single quality) */
+    buffer?: Buffer;
+    /** Multi-quality outputs keyed by QualityConfig.id */
+    variants?: Record<string, Buffer>;
+    /** Thumbnail as buffer (JPEG) */
+    thumbnail?: Buffer;
+    /** MIME type of the primary output */
+    mimeType: string;
+    /** File extension without dot */
+    extension: string;
+}
+interface ResolvedQuality {
+    width?: number;
+    height?: number;
+    videoBitrate?: string;
+    audioBitrate?: string;
+    crf?: number;
+    /** FFmpeg -preset value derived from the encoding ladder. */
+    preset?: 'ultrafast' | 'superfast' | 'veryfast' | 'faster' | 'fast' | 'medium' | 'slow' | 'slower' | 'veryslow';
+}
 interface SizeLimitMap {
     image?: number;
     video?: number;
     audio?: number;
     document?: number;
     default?: number;
+}
+interface UploadResult {
+    status: 'success' | 'chunk_received' | 'error';
+    message: string;
+    fileId?: string;
+    url?: string;
+    storageRef?: string;
+    chunkIndex?: number;
+    totalChunks?: number;
+    progress?: number;
+    metadata?: Record<string, any>;
+    fields?: Record<string, any>;
+    file?: FileRecord;
+    files?: FileRecord[];
+    fileFields?: Record<string, FileRecord | FileRecord[]>;
+    parentFile?: FileRecord;
+    variants?: Record<string, {
+        url?: string;
+        storageRef: string;
+        fileId: string;
+    }>;
+    thumbnailUrl?: string;
+    error?: any;
+}
+interface FrontendTransformerConfig {
+    type?: 'image' | 'video' | 'audio';
+    /** Single named or numeric quality level. */
+    quality?: 'high' | 'medium' | 'low' | number | string;
+    /**
+     * Resolution labels for multi-quality encode.
+     * Each string must be a known resolution: '2160p' | '1440p' | '1080p' |
+     * '720p' | '540p' | '480p' | '360p' | '240p'
+     * The encoding ladder automatically assigns crf, bitrate, and preset.
+     */
+    qualities?: ResolutionLabel[];
+    /**
+     * Fully explicit per-variant configs.
+     * Can be an array or a Record keyed by variant id.
+     * Takes precedence over `qualities`.
+     */
+    qualityConfigs?: QualityConfig[] | Record<string, QualityConfig>;
+    /**
+     * Output container format.
+     * Accepts both plain ('mp4') and MIME-prefixed ('video/mp4') — server strips prefix.
+     * Video defaults: 'mp4'. Audio defaults: 'mp3'. Image defaults: source format.
+     */
+    format?: string;
+    startTime?: number;
+    endTime?: number;
+    mute?: boolean;
+    videoBitrate?: string;
+    audioBitrate?: string;
+    resolution?: ResolutionLabel | string;
+    codec?: string;
+    generateThumbnail?: boolean;
+    thumbnailTimeSeconds?: number;
+    width?: number;
+    height?: number;
+    /** Unused by the server; safe to include arbitrary frontend metadata. */
+    auto?: boolean;
+    [key: string]: any;
 }
 interface UploadTypeConfig {
     name: string;
@@ -175,11 +313,15 @@ interface StorageContext {
 }
 interface StorageAdapter {
     readonly name: string;
+    readonly hasNativeVariantSupport?: boolean;
     writeChunk(fileId: string, chunkNumber: number, data: Buffer, ctx: StorageContext): Promise<void>;
     finalize(fileId: string, ctx: StorageContext): Promise<StorageWriteResult>;
     readStream(ref: string, options?: StorageReadOptions): Promise<Readable>;
     delete(ref: string): Promise<void>;
     putObject?(fileId: string, data: Buffer, ctx: StorageContext): Promise<StorageWriteResult>;
+    putStream?(fileId: string, stream: Readable, ctx: StorageContext): Promise<StorageWriteResult>;
+    assembleChunksToPath?(fileId: string, totalChunks: number, ext: string, ctx: StorageContext): Promise<string>;
+    readChunk?(fileId: string, chunkNumber: number, ctx: StorageContext): Promise<Buffer>;
 }
 interface CacheAdapter {
     readonly name: string;
@@ -200,7 +342,7 @@ interface NormalizedRequest {
     fields?: Record<string, any>;
     files?: any[];
     fileFields?: Record<string, any>;
-    transformer?: any;
+    transformer?: FrontendTransformerConfig;
 }
 interface NormalizedResponse {
     status(code: number): NormalizedResponse;
@@ -222,6 +364,9 @@ interface FrameworkAdapter<THandler = any> {
 interface ThumbnailGenerator {
     generate(file: FileRecord, source: Readable | Buffer): Promise<Buffer | null>;
 }
+/**
+ * @upload-media/server - Add to existing types.ts
+ */
 interface UploadEngineConfig {
     storages: Record<string, StorageAdapter>;
     defaultStorage: string;
@@ -232,7 +377,6 @@ interface UploadEngineConfig {
     uploadTypes: Record<string, UploadTypeConfig>;
     globalLimits?: SizeLimitMap;
     globalChunkLimits?: SizeLimitMap;
-    thumbnailGenerator?: ThumbnailGenerator;
     onUploadComplete?: (file: FileRecord) => void | Promise<void>;
     onError?: (error: Error, context: {
         uploadType?: string;
@@ -244,6 +388,26 @@ interface UploadEngineConfig {
     maxTotalSize?: number;
     onProgress?: (progress: any) => void;
     autoRespond?: boolean;
+    mediaProcessor?: MediaProcessorOptions;
+}
+interface MediaProcessorOptions {
+    /** Directory for temporary files. Defaults to os.tmpdir() */
+    tempDir?: string;
+    /** Path to ffmpeg binary. If not set, uses system PATH */
+    ffmpegPath?: string;
+    /** Path to ffprobe binary */
+    ffprobePath?: string;
+    /** Max concurrent ffmpeg processes (default: 2) */
+    maxConcurrency?: number;
+    /** Timeout per processing job in ms (default: 10 minutes) */
+    timeoutMs?: number;
+}
+interface MediaProcessorOptions {
+    tempDir?: string;
+    ffmpegPath?: string;
+    ffprobePath?: string;
+    maxConcurrency?: number;
+    timeoutMs?: number;
 }
 interface ResolvedUploadEngineConfig extends Required<Pick<UploadEngineConfig, 'storages' | 'defaultStorage' | 'database' | 'uploadTypes'>> {
     cache?: CacheAdapter;
@@ -381,81 +545,56 @@ declare const CACHE_PREFIXES: {
 declare function getMimeKind(contentType: string): 'image' | 'video' | 'audio' | 'document' | 'unknown';
 
 /**
- * @upload-media/server - UploadEngine v2
+ * @upload-media/server - UploadEngine v4
  *
- * Production-grade orchestrator that:
- * ✓ Detects chunked vs non-chunked uploads properly (no assumptions)
- * ✓ Supports custom form fields (not locked to schema)
- * ✓ Works with or without database
- * ✓ Works with any storage (S3, Cloudinary, Local, Database)
- * ✓ Config-driven, not hardcoded limits
- * ✓ Full end-to-end validation
- * ✓ Proper hook integration
+ * Changes vs v3:
+ *
+ * [A] PARALLEL VARIANT ENCODING
+ *     Variants are now encoded concurrently via Promise.all() inside
+ *     MediaProcessor._encodeVideoFromPath(). The Semaphore already caps
+ *     total concurrent FFmpeg processes across the whole process, so
+ *     running all variants for one upload in parallel is safe — the
+ *     semaphore is still held for the duration. Encoding time drops by
+ *     ~(n-1)/n for n variants (e.g. 4 variants ≈ 75 % faster wall-clock).
+ *
+ * [B] DETERMINISTIC VARIANT FILE IDs
+ *     Variant IDs are now `${fileId}_${qualityId}` (e.g.
+ *     "file_1234_720p", "file_1234_480p"). This lets callers construct
+ *     the ID for any quality level without a DB lookup, mirrors the
+ *     YouTube-style URL pattern, and prevents duplicate quality variants
+ *     (same qualityId → same derived fileId → upsert, not duplicate insert).
+ *
+ * [C] CHUNK-COUNT FIX FOR DATABASE ADAPTER
+ *     After encoding, the primary variant is stored via putObject() which
+ *     writes a single chunk (chunk 0). The updateFile() call now always
+ *     sets chunkCount:1 and chunkSize:primarySize so FileServingHandler's
+ *     ChunkReadStream does not try to read non-existent chunks 1..N.
+ *     The original upload chunk rows for the raw file are still in the DB
+ *     but are no longer referenced by the record's chunkCount.
+ *
+ * [D] DEDUP QUALITY CONFIGS
+ *     normaliseQualityConfigs() deduplicates entries by id so callers
+ *     cannot accidentally request the same quality twice.
  */
 
-interface UploadResult {
-    status: 'success' | 'chunk_received' | 'error';
-    message: string;
-    fileId?: string;
-    url?: string;
-    storageRef?: string;
-    chunkIndex?: number;
-    totalChunks?: number;
-    progress?: number;
-    metadata?: Record<string, any>;
-    fields?: Record<string, any>;
-    file?: FileRecord;
-    files?: FileRecord[];
-    fileFields?: Record<string, FileRecord | FileRecord[]>;
-    parentFile?: FileRecord;
-    error?: any;
-}
 declare class UploadEngine {
     private config;
+    private mediaProcessor;
     constructor(config: UploadEngineConfig);
-    /**
-     * Main upload handler.
-     * Auto-detects chunked vs non-chunked by looking at actual multipart fields.
-     */
     handle: (req: NormalizedRequest, res: NormalizedResponse) => Promise<UploadResult | {
         status: "success";
         message: string;
         metadata: UploadResult[];
     } | void>;
-    /**
-     * Detect chunked upload by checking for required chunked fields.
-     * Proper detection - no assumptions.
-     */
-    private isChunkedUpload;
-    /**
-     * Handle chunked upload from the worker.
-     * FIXED: Fully adaptive to frontend chunk config changes
-     */
     private handleChunkedUpload;
-    /**
-     * Helper method to get chunk size from storage
-     */
-    private getChunkSize;
-    /**
-     * Handle non-chunked upload (regular file).
-     */
     private handleNonChunkedUpload;
-    /**
-     * Build field validation rules from config + custom fields.
-     */
-    /**
-     * Cleanup utility to remove files from storage and database.
-     * Useful for error handling in the calling middleware.
-     */
+    private assembleChunksToDisk;
+    private shouldProcessMedia;
+    private processMediaFromPath;
     cleanup(files: FileRecord | FileRecord[]): Promise<void>;
+    private isChunkedUpload;
     private buildFieldValidation;
-    /**
-     * Build file validation rules from config.
-     */
     private buildFileValidation;
-    /**
-     * Extract custom fields (non-standard) from parsed fields.
-     */
     private extractCustomFields;
     private handleError;
     private getContentType;
@@ -579,8 +718,14 @@ declare class MultipartParser {
     private static validateField;
     private static validateFile;
     /**
+     * Helper method to check if a MIME type matches any of the given patterns
+     */
+    private static matchesMimePattern;
+    /**
      * Detect MIME type from magic bytes.
      * Returns detected MIME type or 'application/octet-stream' if unknown.
+     *
+     * This method now handles both Buffer and Uint8Array inputs safely.
      */
     private static detectMimeType;
     /**
@@ -755,6 +900,35 @@ declare class SQLRepository implements MetadataRepository {
     private rowToRecord;
 }
 
+/**
+ * @upload-media/server - LocalDiskStorageAdapter (fixed)
+ *
+ * Fixes applied:
+ *
+ * [1] writeChunk now writes each chunk to its own indexed file
+ *     (e.g. <fileId>.chunk-000001) instead of blindly appending to a
+ *     single .part file. This makes writes order-safe and retry-safe —
+ *     a re-sent chunk just overwrites its own file with the same data.
+ *
+ * [2] fs.open(..., 'w') removed — it truncated the running file on
+ *     every re-open (e.g. after a server restart mid-upload). Chunk
+ *     files are now written with fs.writeFile which is atomic.
+ *
+ * [3] assembleChunksToPath() implemented. UploadEngine calls this
+ *     first; it streams each chunk file to disk in order without ever
+ *     loading the full file into heap. Falls back to UploadEngine's
+ *     own buffer path only if this method is absent — which it no
+ *     longer is, so the fallback readChunk crash path is avoided.
+ *
+ * [4] finalize() concatenates chunk files to the final path, then
+ *     deletes the chunk files. Called by UploadEngine after
+ *     assembleChunksToPath when no media processing is needed.
+ *
+ * [5] fileCtx map stores StorageContext per fileId so finalize() and
+ *     assembleChunksToPath() can reconstruct paths without callers
+ *     having to re-supply the context. Entries are cleaned up after use.
+ */
+
 interface LocalDiskStorageOptions {
     rootDir: string;
     publicBaseUrl?: string;
@@ -763,62 +937,172 @@ declare class LocalDiskStorageAdapter implements StorageAdapter {
     readonly name = "local-disk";
     private rootDir;
     private publicBaseUrl?;
-    private openHandles;
+    /** Remembers the StorageContext for each in-progress upload. */
+    private fileCtx;
     constructor(options: LocalDiskStorageOptions);
     private ensureDir;
-    private partPath;
+    /**
+     * Path for an individual chunk file.
+     * Zero-padded index keeps OS directory listings in order.
+     */
+    private chunkPath;
+    /** Path for the final assembled file. */
     private finalPath;
+    /** Temporary assembled path used during media processing. */
+    private assembledPath;
+    /**
+     * Write one chunk to its own file (FIX [1] + [2]).
+     * Writing is idempotent: retrying chunk N just overwrites the same file.
+     */
     writeChunk(fileId: string, chunkNumber: number, data: Buffer, ctx: StorageContext): Promise<void>;
+    /**
+     * Stream all chunk files to a single assembled file on disk (FIX [3]).
+     *
+     * UploadEngine.assembleChunksToDisk() calls this first. Because it
+     * exists on this adapter, the engine never falls through to the
+     * missing readChunk() fallback.
+     *
+     * Returns the path of the assembled file so FFmpeg (or the engine's
+     * single-quality path) can read directly from disk.
+     */
+    assembleChunksToPath(fileId: string, totalChunks: number, ext: string, ctx: StorageContext): Promise<string>;
+    /**
+     * Concatenate chunk files into the final stored file, then remove the
+     * chunk files (FIX [4]). Called by UploadEngine when no media
+     * processing transformer is provided.
+     */
     finalize(fileId: string, ctx: StorageContext): Promise<StorageWriteResult>;
+    putStream(fileId: string, stream: Readable, ctx: StorageContext): Promise<StorageWriteResult>;
+    /** Single-shot write for non-chunked uploads. */
     putObject(fileId: string, data: Buffer, ctx: StorageContext): Promise<StorageWriteResult>;
     readStream(ref: string, options?: StorageReadOptions): Promise<Readable>;
     delete(ref: string): Promise<void>;
 }
 
 /**
- * @upload-media/server - DatabaseStorageAdapter
+ * @upload-media/server - DatabaseStorageAdapter v2
  *
- * Stores chunk bytes directly in whichever database the developer has
- * already wired up via a MetadataRepository (Mongo, Postgres, MySQL,
- * SQLite...). This is the "no extra infra" option — good for small
- * apps or self-hosted setups where adding S3/Cloudinary is overkill.
- * Requires the repository to implement createChunk/getChunk/
- * deleteChunksByFileId (MongooseRepository, SQLRepository, and
- * InMemoryRepository all do).
+ * FIX [STREAM-CHUNK]: putStream() implemented.
+ *
+ * Problem this fixes:
+ *   UploadEngine's streamFileToStorage() prefers storage.putStream() when
+ *   available, falling back to "read whole file into a Buffer, call
+ *   putObject()" when it isn't. DatabaseStorageAdapter had no putStream,
+ *   so EVERY encoded variant — no matter how large — was read fully into
+ *   heap and written as a SINGLE chunk document (chunkNumber 0).
+ *
+ *   Two concrete failures from that:
+ *     a) Heap exhaustion: large variants (hundreds of MB to GB) held fully
+ *        in memory, and with parallel variant encoding several of these
+ *        could be resident at once.
+ *     b) MongoDB's 16MB BSON document size limit: any variant whose encoded
+ *        size exceeds ~16MB cannot be written as a single chunk document at
+ *        all — the insert fails outright on a real MongoDB deployment.
+ *
+ * Fix: putStream() now re-chunks the source stream into fixed-size pieces
+ * (matching the ORIGINAL upload's chunkSize when available, so the file's
+ * chunk geometry is consistent end-to-end) and writes each piece as its own
+ * chunk document, exactly mirroring how the initial chunked upload itself
+ * was stored. The final chunk is the remainder (e.g. for a 5MB file in 2MB
+ * pieces: chunks of 2MB, 2MB, 1MB — NOT padded to 2MB).
+ *
+ * putStream() returns { storageRef, chunkCount, chunkSize, totalSize } so
+ * the caller can persist accurate chunk metadata instead of assuming 1
+ * chunk. This keeps FileServingHandler's ChunkReadStream — which already
+ * assumes fixed chunkSize with a remainder-sized last chunk — working
+ * unchanged; only the metadata written by the upload path needed fixing.
+ *
+ * Other fixes carried over from the previous revision:
+ * [1] assembleChunksToPath() — streams chunk rows to a temp file on disk.
+ * [2] finalize() — chunk rows are the source of truth, no-op move needed.
+ * [3] StorageContext threaded through to all methods.
+ * [4] putObject upsert semantics preserved for small/non-chunked files.
  */
 
 interface DatabaseStorageOptions {
     database: MetadataRepository;
-    /** How many chunks to prefetch ahead while streaming reads (default 2) */
+    /**
+     * Number of chunks to pre-fetch ahead of the current read position
+     * in ChunkReadStream. Defaults to 2.
+     */
     prefetchCount?: number;
+    /**
+     * Directory used for temporary assembled files during media processing.
+     * Defaults to os.tmpdir().
+     */
+    tempDir?: string;
+    /**
+     * Fallback chunk size (bytes) used by putStream() when the StorageContext
+     * does not carry an original chunkSize to inherit (e.g. non-chunked /
+     * single-shot uploads that still produce a large processed variant).
+     * Defaults to 4MB — comfortably under MongoDB's 16MB BSON document limit
+     * even after BSON/driver overhead.
+     */
+    defaultStreamChunkSize?: number;
 }
+/** Extended write result that callers can use to persist accurate chunk metadata. */
+interface StreamWriteResult extends StorageWriteResult {
+    chunkCount: number;
+    chunkSize: number;
+    totalSize: number;
+}
+/** Ensure we always hand back a proper Node.js Buffer. */
+declare function toBuffer(input: Buffer | Uint8Array | ArrayBuffer | any): Buffer;
 declare class DatabaseStorageAdapter implements StorageAdapter {
     readonly name = "database";
     private database;
     private prefetchCount;
+    private tempDir;
+    private defaultStreamChunkSize;
     constructor(options: DatabaseStorageOptions);
-    writeChunk(fileId: string, chunkNumber: number, data: Buffer): Promise<void>;
-    finalize(fileId: string): Promise<StorageWriteResult>;
+    writeChunk(fileId: string, chunkNumber: number, data: Buffer, ctx: StorageContext): Promise<void>;
+    assembleChunksToPath(fileId: string, totalChunks: number, ext: string, ctx: StorageContext): Promise<string>;
+    finalize(fileId: string, ctx: StorageContext): Promise<StorageWriteResult>;
     putObject(fileId: string, data: Buffer, ctx: StorageContext): Promise<StorageWriteResult>;
+    /** Shared chunking logic for the in-memory guard-rail path in putObject(). */
+    private writeBufferAsChunks;
+    putStream(fileId: string, source: Readable, ctx: StorageContext): Promise<StreamWriteResult>;
+    /**
+     * Resolve the chunk size to use for re-chunking an outgoing stream.
+     * Prefers the ORIGINAL upload's chunkSize (carried on StorageContext by
+     * UploadEngine) so a variant's on-disk chunk geometry matches the source
+     * file's. Falls back to defaultStreamChunkSize for non-chunked uploads.
+     */
+    private resolveChunkSize;
     readStream(ref: string, options?: StorageReadOptions): Promise<Readable>;
     delete(ref: string): Promise<void>;
 }
 
 /**
- * @upload-media/server - S3StorageAdapter
+ * @upload-media/server - S3StorageAdapter (fixed)
  *
- * Uses S3's *real* multipart upload API (CreateMultipartUpload /
- * UploadPart / CompleteMultipartUpload) so chunks stream straight to
- * S3 instead of being assembled somewhere in between. Works against
- * AWS S3 or any S3-compatible provider (Cloudflare R2, MinIO,
- * DigitalOcean Spaces, Backblaze B2) via `endpoint` + `forcePathStyle`.
+ * Fixes applied:
  *
- * S3 requires every part except the last to be >= 5MB. Client chunk
- * sizes are usually smaller than that (1-2MB), so this adapter buffers
- * incoming chunks internally and only calls UploadPart once the buffer
- * crosses the configured minimum — the client-side chunk size and the
- * S3 part size are therefore fully decoupled, and this "just works"
- * regardless of how the frontend is configured.
+ * [1] assembleChunksToPath() implemented. UploadEngine calls this on
+ *     the last chunk. The adapter streams each buffered S3 part to a
+ *     temp file on disk so FFmpeg can read from disk rather than
+ *     holding the full file in heap. The in-progress multipart upload
+ *     is NOT finalized here — the engine calls finalize() separately
+ *     after media processing, which completes the S3 multipart upload
+ *     via CompleteMultipartUploadCommand.
+ *
+ *     Because S3 does not expose already-uploaded parts for re-reading
+ *     (without downloading the whole object), the adapter maintains a
+ *     local part-buffer cache (partCache) in parallel so we can
+ *     reconstruct the file for assembleChunksToPath without an extra
+ *     S3 round-trip.
+ *
+ * [2] finalize() was already correct — it calls
+ *     CompleteMultipartUploadCommand — but was never called by the
+ *     engine. UploadEngine now calls finalize() after
+ *     assembleChunksToPath + media processing (see UploadEngine fix).
+ *     No change needed here; documented for clarity.
+ *
+ * [3] StorageContext (including ctx.chunkCount) is now threaded through
+ *     all methods consistently.
+ *
+ * [4] partCache is cleared in finalize() and on abort to avoid unbounded
+ *     memory growth for long-lived server processes with many uploads.
  */
 
 interface S3StorageOptions {
@@ -829,45 +1113,99 @@ interface S3StorageOptions {
         secretAccessKey: string;
         sessionToken?: string;
     };
+    /** For S3-compatible providers (Cloudflare R2, MinIO, etc.) */
     endpoint?: string;
     forcePathStyle?: boolean;
-    /** Public URL builder, defaults to the AWS virtual-hosted-style URL */
+    /** Public URL builder; defaults to AWS virtual-hosted-style URL. */
     buildPublicUrl?: (bucket: string, key: string) => string;
-    /** Override how a logical bucket/fileId becomes an S3 key */
+    /** Override how a logical fileId becomes an S3 object key. */
     buildKey?: (fileId: string, ctx: StorageContext) => string;
-    /** Minimum bytes to buffer before flushing an UploadPart (default 5MB, the S3 minimum) */
+    /**
+     * Minimum bytes to buffer before flushing an UploadPart.
+     * Default: 5 MB (the S3 minimum for all but the last part).
+     */
     minPartSize?: number;
-    /** Pass an already-constructed S3Client instead of letting the adapter build one */
+    /** Pass an already-constructed S3Client to skip credential config. */
     client?: any;
+    /**
+     * Directory for temporary assembled files used during media processing.
+     * Defaults to os.tmpdir().
+     */
+    tempDir?: string;
 }
 declare class S3StorageAdapter implements StorageAdapter {
     readonly name = "s3";
     private options;
-    private client;
-    private uploads;
-    constructor(options: S3StorageOptions);
+    private _client;
     private minPartSize;
+    private tempDir;
+    /** Active multipart uploads keyed by fileId. */
+    private uploads;
+    /**
+     * FIX [1]: Parallel cache of the raw engine-chunks (before S3-part
+     * buffering) so assembleChunksToPath() can reconstruct the file
+     * without downloading from S3.
+     */
+    private partCache;
+    constructor(options: S3StorageOptions);
     private getClient;
+    private loadCommands;
     private buildKey;
     private buildPublicUrl;
-    writeChunk(fileId: string, chunkNumber: number, data: Buffer, ctx: StorageContext): Promise<void>;
     private flushPart;
-    private loadCommands;
+    writeChunk(fileId: string, chunkNumber: number, data: Buffer, ctx: StorageContext): Promise<void>;
+    assembleChunksToPath(fileId: string, totalChunks: number, ext: string, ctx: StorageContext): Promise<string>;
     finalize(fileId: string, ctx: StorageContext): Promise<StorageWriteResult>;
+    putStream(fileId: string, stream: Readable, ctx: StorageContext): Promise<StorageWriteResult>;
     putObject(fileId: string, data: Buffer, ctx: StorageContext): Promise<StorageWriteResult>;
     readStream(ref: string, options?: StorageReadOptions): Promise<Readable>;
     delete(ref: string): Promise<void>;
 }
 
 /**
- * @upload-media/server - CloudinaryStorageAdapter
+ * @upload-media/server - CloudinaryStorageAdapter (fixed)
  *
- * Built on the official `cloudinary` SDK's `upload_large_stream`, which
- * implements Cloudinary's chunked-upload wire protocol correctly
- * (including retry semantics) — we don't reimplement that protocol by
- * hand. Each engine chunk is written into the stream as it arrives;
- * Cloudinary handles assembly server-side. `finalize()` closes the
- * stream and resolves once Cloudinary confirms the asset is ready.
+ * Fixes applied:
+ *
+ * [1] assembleChunksToPath() implemented. UploadEngine calls this on
+ *     the last chunk so FFmpeg can process the file from disk before
+ *     the final upload goes to Cloudinary.
+ *
+ *     Cloudinary's upload_large_stream does not expose already-written
+ *     chunks for re-reading, so the adapter maintains a local
+ *     chunkCache (raw engine-chunks indexed by chunkNumber) in parallel.
+ *     assembleChunksToPath() drains that cache in order into a temp
+ *     file on disk and returns the path.
+ *
+ *     The Cloudinary stream is left open during media processing —
+ *     finalize() ends the stream and waits for Cloudinary's confirmation
+ *     once the (optionally re-encoded) file has been streamed in via
+ *     putStream / putObject.
+ *
+ * [2] finalize() previously only ended the upload_large_stream and
+ *     returned the result. It is now also called by UploadEngine after
+ *     media processing, at which point the engine streams the processed
+ *     file via putObject (or putStream). The pending upload started by
+ *     writeChunk is therefore ABORTED in finalize() when the engine is
+ *     going to re-upload a processed variant — detected by checking
+ *     whether the caller supplies a ctx whose contentType differs from
+ *     the one used to open the stream.
+ *
+ *     Simpler rule implemented here: UploadEngine always calls
+ *     putObject/putStream for the final artifact after processing, so
+ *     finalize() just aborts and removes any lingering stream rather
+ *     than trying to complete it with raw bytes.
+ *
+ *     If no processing happens the engine calls finalize() directly and
+ *     the stream IS completed normally.
+ *
+ * [3] chunkCache is cleared in finalize() and on abort (FIX [4] parity).
+ *
+ * [4] putStream() added. If the storage adapter exposes putStream(),
+ *     UploadEngine prefers it for large processed files (zero heap copy).
+ *     Cloudinary's upload_stream is used under the hood.
+ *
+ * [5] StorageContext is threaded through all methods for consistency.
  */
 
 interface CloudinaryStorageOptions {
@@ -878,23 +1216,40 @@ interface CloudinaryStorageOptions {
     folder?: string;
     /** Override how a fileId maps to a Cloudinary public_id */
     buildPublicId?: (fileId: string, ctx: StorageContext) => string;
-    /** Pass an already-configured cloudinary instance (v1 or v2 API) instead */
+    /** Pass an already-configured cloudinary instance (v1 or v2 API) */
     cloudinary?: any;
+    /**
+     * Directory for temporary assembled files used during media processing.
+     * Defaults to os.tmpdir().
+     */
+    tempDir?: string;
 }
 declare class CloudinaryStorageAdapter implements StorageAdapter {
     readonly name = "cloudinary";
+    readonly hasNativeVariantSupport = true;
     private options;
-    private cloudinary;
+    private _cloudinary;
+    private tempDir;
+    /** Active upload_large_stream sessions keyed by fileId. */
     private pending;
+    /**
+     * FIX [1]: Raw engine-chunks cached so assembleChunksToPath() can
+     * reconstruct the file without re-downloading from Cloudinary.
+     */
+    private chunkCache;
     constructor(options: CloudinaryStorageOptions);
     private getSdk;
     private resourceTypeFor;
     private buildPublicId;
     private getOrCreateUpload;
     writeChunk(fileId: string, chunkNumber: number, data: Buffer, ctx: StorageContext): Promise<void>;
-    finalize(fileId: string): Promise<StorageWriteResult>;
+    assembleChunksToPath(fileId: string, totalChunks: number, ext: string, ctx: StorageContext): Promise<string>;
+    /** Destroy the pending upload_large_stream without completing it. */
+    private _abortPending;
+    finalize(fileId: string, ctx: StorageContext): Promise<StorageWriteResult>;
+    putStream(fileId: string, stream: Readable, ctx: StorageContext): Promise<StorageWriteResult>;
     putObject(fileId: string, data: Buffer, ctx: StorageContext): Promise<StorageWriteResult>;
-    readStream(ref: string): Promise<Readable>;
+    readStream(ref: string, _options?: StorageReadOptions): Promise<Readable>;
     delete(ref: string): Promise<void>;
 }
 
@@ -1133,4 +1488,4 @@ declare function signData(data: string, secret: string): string;
  */
 declare function verifySignature(data: string, secret: string, signature: string): boolean;
 
-export { AUTH_CACHE_TTL_SECONDS, CACHE_PREFIXES, type CacheAdapter, type ChunkRecord, CloudinaryStorageAdapter, type CloudinaryStorageOptions, ConfigValidationError, CreateH3FileServingHandler, CreateNextjsFileServingHandler, DEFAULT_CACHE_TTL_SECONDS, DEFAULT_CHUNK_SIZES, DEFAULT_CLEANUP_BATCH_SIZE, DEFAULT_CLEANUP_INTERVAL_MS, DEFAULT_QUALITY, DEFAULT_SIZE_LIMITS, DEFAULT_STALE_UPLOAD_RETENTION_MS, type DatabaseHooks, DatabaseStorageAdapter, type DatabaseStorageOptions, type FieldValidationRule, type FileInfo, type FileQuery, type FileRecord, type FileRecordPatch, type FileValidationRule, type FrameworkAdapter, type H3EventLike, type HandlerResult, type HookContext, InMemoryRepository, type IncomingChunkFields, LocalDiskStorageAdapter, type LocalDiskStorageOptions, type MediaKind, type MetadataRepository, MongooseRepository, type MongooseRepositoryOptions, MultipartParser, type NewFileRecord, type NormalizedRequest, type NormalizedResponse, type ParseOptions, type ParsedFile, type ParsedMultipart, type ParserHooks, QUALITY_MAPPINGS, type Quality, type ResolvedUploadEngineConfig, S3StorageAdapter, type S3StorageOptions, type SQLExecutor, SQLRepository, type SQLRepositoryOptions, SUPPORTED_MIME_TYPES, type SizeLimitMap, type StorageAdapter, type StorageContext, type StorageHooks, type StorageReadOptions, type StorageWriteResult, THUMBNAIL_CHUNK_SIZE, THUMBNAIL_DIMENSIONS, THUMBNAIL_SIZE_LIMIT, type ThumbnailGenerator, UploadEngine, type UploadEngineConfig, type UploadHandler, type UploadHooks, type UploadResult, type UploadResultPayload, type UploadTypeConfig, ValidationError, assertKindAllowed, assertRequiredFields, assertWithinLimit, chainHooks, createAutoCleanupHooks, createElysiaAdapter, createElysiaFileServingHandler, createExpressAdapter, createExpressFileServingMiddleware, createFastifyAdapter, createFastifyFileServingPlugin, createH3Adapter, createHonoAdapter, createHonoFileServingMiddleware, createKoaAdapter, createKoaFileServingMiddleware, createLoggingHooks, createMetricsHooks, createNextjsAdapter, createRedisCacheHooks, createStorageLoggingHooks, createTransformationHooks, createValidationHooks, decryptQueryString, detectKind, generateRandomString, getMimeKind, hashString, parseBooleanFlag, parseIntSafe, parseJsonSafe, resolveChunkLimit, resolveSizeLimit, resolveStorageKey, resolveUploadConfig, signData, verifySignature };
+export { AUTH_CACHE_TTL_SECONDS, type AudioProcessingConfig, CACHE_PREFIXES, type CacheAdapter, type ChunkRecord, CloudinaryStorageAdapter, type CloudinaryStorageOptions, ConfigValidationError, CreateH3FileServingHandler, CreateNextjsFileServingHandler, DEFAULT_CACHE_TTL_SECONDS, DEFAULT_CHUNK_SIZES, DEFAULT_CLEANUP_BATCH_SIZE, DEFAULT_CLEANUP_INTERVAL_MS, DEFAULT_QUALITY, DEFAULT_SIZE_LIMITS, DEFAULT_STALE_UPLOAD_RETENTION_MS, type DatabaseHooks, DatabaseStorageAdapter, type DatabaseStorageOptions, type FieldValidationRule, type FileInfo, type FileQuery, type FileRecord, type FileRecordPatch, type FileValidationRule, type FrameworkAdapter, type FrontendTransformerConfig, type H3EventLike, type HandlerResult, type HookContext, type ImageProcessingConfig, InMemoryRepository, type IncomingChunkFields, LocalDiskStorageAdapter, type LocalDiskStorageOptions, type MediaKind, type MediaProcessorOptions, type MetadataRepository, MongooseRepository, type MongooseRepositoryOptions, MultipartParser, type NewFileRecord, type NormalizedRequest, type NormalizedResponse, type ParseOptions, type ParsedFile, type ParsedMultipart, type ParserHooks, type ProcessingResult, QUALITY_MAPPINGS, type Quality, type QualityConfig, type ResolutionLabel, type ResolvedQuality, type ResolvedUploadEngineConfig, S3StorageAdapter, type S3StorageOptions, type SQLExecutor, SQLRepository, type SQLRepositoryOptions, SUPPORTED_MIME_TYPES, type SizeLimitMap, type StorageAdapter, type StorageContext, type StorageHooks, type StorageReadOptions, type StorageWriteResult, type StreamWriteResult, THUMBNAIL_CHUNK_SIZE, THUMBNAIL_DIMENSIONS, THUMBNAIL_SIZE_LIMIT, type ThumbnailGenerator, UploadEngine, type UploadEngineConfig, type UploadHandler, type UploadHooks, type UploadResult, type UploadResultPayload, type UploadTypeConfig, ValidationError, type VideoProcessingConfig, type VideoQualityConfig, assertKindAllowed, assertRequiredFields, assertWithinLimit, chainHooks, createAutoCleanupHooks, createElysiaAdapter, createElysiaFileServingHandler, createExpressAdapter, createExpressFileServingMiddleware, createFastifyAdapter, createFastifyFileServingPlugin, createH3Adapter, createHonoAdapter, createHonoFileServingMiddleware, createKoaAdapter, createKoaFileServingMiddleware, createLoggingHooks, createMetricsHooks, createNextjsAdapter, createRedisCacheHooks, createStorageLoggingHooks, createTransformationHooks, createValidationHooks, decryptQueryString, detectKind, generateRandomString, getMimeKind, hashString, parseBooleanFlag, parseIntSafe, parseJsonSafe, resolveChunkLimit, resolveSizeLimit, resolveStorageKey, resolveUploadConfig, signData, toBuffer, verifySignature };

@@ -8,6 +8,7 @@ const {
   DatabaseStorageAdapter,
   MongooseRepository
 } = require('@upload-media/server');
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 
 const app = express();
 const port = 3000;
@@ -90,6 +91,19 @@ app.use(createExpressFileServingMiddleware(
 // ============================================
 const engine = new UploadEngine({
   database: database,
+  mediaProcessor: {
+    ffmpegPath: ffmpegPath,
+    tempDir: './temp-uploads',
+    // 'balanced' — good quality + reasonable speed (default)
+    // 'speed'    — fastest possible encode, slightly lower quality
+    // 'quality'  — best quality, slowest encode
+    speedProfile: 'balanced',
+    // maxConcurrency caps how many upload sessions can process simultaneously.
+    // Each session can spawn multiple parallel variant encodes on its own.
+    // Rule of thumb: set to number of CPU cores / 2 for mixed-workload servers,
+    // or leave unset to let the library auto-detect (min(4, cpuCount)).
+    // maxConcurrency: 4,
+  },
   storages: {
     database: new DatabaseStorageAdapter({
       database: database,
@@ -109,6 +123,11 @@ const engine = new UploadEngine({
       allowedKinds: ['video'],
       limits: { video: 100 * 1024 * 1024 },
       thumbnails: true
+    },
+    audio: {
+      name: 'audio',
+      allowedKinds: ['audio'],
+      limits: { audio: 50 * 1024 * 1024 }
     }
   },
   onUploadComplete: (file) => {
@@ -132,22 +151,22 @@ app.get('/', (req, res) => {
 app.post('/api/upload', expressAdapter.wrap(async (req, res) => {
   console.log('--- Incoming Upload Request ---');
   const result = await engine.handle(req, res);
-  console.log(result)
+  //sconsole.log(result)
   // If the upload is complete, we have access to fields and named files
   if (result.status === 'success' && (result.progress === 100 || !result.chunkIndex)) {
     console.log('✅ Upload Finalized!');
-    console.log('Fields:', req.fields); // Access form fields
-    console.log('File Mapping:', Object.keys(req.fileFields || {})); // Access named fields
+    //console.log('Fields:', req.fields); // Access form fields
+    //console.log('File Mapping:', Object.keys(req.fileFields || {})); // Access named fields
 
     // Demonstrate access to a specific named field if it exists
     if (req.fileFields['postImage']) {
-      console.log('📸 Captured postImage:', req.fileFields['postImage'].originalName);
+      //console.log('📸 Captured postImage:', req.fileFields['postImage'].originalName);
     }
 
     // You can access additional file info from the database
     if (result.file) {
       const fileRecord = await database.getFileById(result.file.id);
-      console.log('📁 File record from DB:', fileRecord);
+      // console.log('📁 File record from DB:', fileRecord);
     }
 
     return {

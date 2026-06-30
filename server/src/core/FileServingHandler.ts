@@ -1,6 +1,5 @@
 /**
  * @upload-media/server - FileServingHandler
- * FIXED: Proper chunk size calculation
  */
 import { createReadStream } from 'fs';
 import { promises as fs } from 'fs';
@@ -315,7 +314,7 @@ export class FileServingHandler {
 /**
  * OptimizedDatabaseMediaStream - Proper chunk size calculation
  */
-class OptimizedDatabaseMediaStream extends Readable {
+export class OptimizedDatabaseMediaStream extends Readable {
     private currentChunk: number;
     private readonly endChunk: number;
     private readonly fileId: string;
@@ -340,12 +339,7 @@ class OptimizedDatabaseMediaStream extends Readable {
         endOffset: number,
         fileSize: number
     ) {
-        super({
-            highWaterMark: 1024 * 1024,
-            objectMode: false,
-            autoDestroy: true
-        });
-
+        super({ highWaterMark: 1024 * 1024, objectMode: false, autoDestroy: true });
         this.database = database;
         this.fileId = fileId;
         this.currentChunk = startChunk;
@@ -355,156 +349,71 @@ class OptimizedDatabaseMediaStream extends Readable {
         this.endOffset = endOffset;
         this.fileSize = fileSize;
         this.totalChunks = Math.ceil(fileSize / fileChunkSize);
-
     }
 
-    /**
-     * Calculate the actual size of a chunk based on file size and chunk size
-     * This is the CORRECT way to calculate chunk sizes
-     */
-    private getChunkActualSize(chunkNumber: number): number {
-        const isLastChunk = chunkNumber === this.totalChunks - 1;
-
-        if (isLastChunk) {
-            // Last chunk: remaining bytes
-            const remainder = this.fileSize % this.fileChunkSize;
-            return remainder > 0 ? remainder : this.fileChunkSize;
-        }
-
-        // All other chunks: full chunk size
-        return this.fileChunkSize;
-    }
-
-    /**
-     * Get the starting byte of a chunk
-     */
+    /** Starting byte of a given chunk in the logical file */
     private getChunkStartByte(chunkNumber: number): number {
         return chunkNumber * this.fileChunkSize;
     }
 
     private async fetchChunk(chunkNumber: number): Promise<ChunkData | null> {
         try {
-            const chunkData = await this.database.getChunk(this.fileId, chunkNumber);
-
-            if (!chunkData) {
+            const raw = await this.database.getChunk(this.fileId, chunkNumber);
+            if (!raw) {
                 console.warn(`⚠️ Missing chunk ${chunkNumber} for file ${this.fileId}`);
                 return null;
             }
-
-            const buffer = this.normalizeBuffer(chunkData);
-
+            const buffer = this.normalizeBuffer(raw);
             if (!buffer || buffer.length === 0) {
-                console.warn(`⚠️ Chunk ${chunkNumber} is empty or invalid`);
+                console.warn(`⚠️ Chunk ${chunkNumber} is empty or unreadable`);
                 return null;
             }
 
-            const expectedSize = this.getChunkActualSize(chunkNumber);
-            if (buffer.length !== expectedSize) {
-                console.warn(`⚠️ Chunk ${chunkNumber}: expected ${expectedSize} bytes, got ${buffer.length} bytes`);
-            }
-
-            return {
-                buffer,
-                chunkNumber: chunkNumber
-            };
-        } catch (error) {
-            console.error(`Error fetching chunk ${chunkNumber}:`, error);
+            return { buffer, chunkNumber };
+        } catch (err) {
+            console.error(`Error fetching chunk ${chunkNumber}:`, err);
             return null;
         }
     }
 
     private normalizeBuffer(input: any): Buffer | null {
         if (!input) return null;
-
-        if (Buffer.isBuffer(input)) {
-            return input;
-        }
-
+        if (Buffer.isBuffer(input)) return input;
         if (input && typeof input === 'object' && input._bsontype === 'Binary') {
-            if (input.buffer) {
-                return Buffer.isBuffer(input.buffer) ? input.buffer : Buffer.from(input.buffer);
-            }
+            if (input.buffer) return Buffer.isBuffer(input.buffer) ? input.buffer : Buffer.from(input.buffer);
             try { return Buffer.from(input); } catch { return null; }
         }
-
         if (input && typeof input === 'object' && input.buffer) {
-            if (Buffer.isBuffer(input.buffer)) {
-                return input.buffer;
-            }
-            if (ArrayBuffer.isView(input.buffer)) {
-                return Buffer.from(input.buffer.buffer, input.buffer.byteOffset, input.buffer.byteLength);
-            }
-            if (input.buffer instanceof ArrayBuffer) {
-                return Buffer.from(input.buffer);
-            }
+            if (Buffer.isBuffer(input.buffer)) return input.buffer;
+            if (ArrayBuffer.isView(input.buffer)) return Buffer.from(input.buffer.buffer, input.buffer.byteOffset, input.buffer.byteLength);
+            if (input.buffer instanceof ArrayBuffer) return Buffer.from(input.buffer);
             try { return Buffer.from(input.buffer); } catch { }
         }
-
-        if (ArrayBuffer.isView(input)) {
-            return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
-        }
-
-        if (typeof input === 'string') {
-            return Buffer.from(input, 'utf-8');
-        }
-
-        try {
-            const converted = Buffer.from(input);
-            return (converted && converted.length > 0) ? converted : null;
-        } catch {
-            return null;
-        }
+        if (ArrayBuffer.isView(input)) return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+        if (typeof input === 'string') return Buffer.from(input, 'utf-8');
+        try { const c = Buffer.from(input); return c.length > 0 ? c : null; } catch { return null; }
     }
 
     private prefetchChunks(): void {
-        if (this.prefetchInProgress || this.destroyed) {
-            return;
-        }
-
+        if (this.prefetchInProgress || this.destroyed) return;
         this.prefetchInProgress = true;
-
         for (let i = 1; i <= PREFETCH_COUNT; i++) {
-            const prefetchChunkNum = this.currentChunk + i;
-
-            if (prefetchChunkNum > this.endChunk) {
-                break;
-            }
-
-            if (this.prefetchQueue.has(prefetchChunkNum)) {
-                continue;
-            }
-
-            const prefetchPromise = this.fetchChunk(prefetchChunkNum);
-            this.prefetchQueue.set(prefetchChunkNum, prefetchPromise);
-
-            prefetchPromise.finally(() => {
-                setTimeout(() => {
-                    if (this.prefetchQueue.has(prefetchChunkNum)) {
-                        this.prefetchQueue.delete(prefetchChunkNum);
-                    }
-                }, 2000);
-            });
+            const n = this.currentChunk + i;
+            if (n > this.endChunk || this.prefetchQueue.has(n)) continue;
+            const p = this.fetchChunk(n);
+            this.prefetchQueue.set(n, p);
+            p.finally(() => { setTimeout(() => this.prefetchQueue.delete(n), 2000); });
         }
-
         this.prefetchInProgress = false;
     }
 
     async _read(): Promise<void> {
-        if (this.destroyed || this.isReading) {
-            return;
-        }
-
-        if (this.currentChunk > this.endChunk) {
-            this.push(null);
-            this.cleanup();
-            return;
-        }
-
+        if (this.destroyed || this.isReading) return;
+        if (this.currentChunk > this.endChunk) { this.push(null); this.cleanup(); return; }
         this.isReading = true;
 
         try {
-            let chunkData: ChunkData | null = null;
-
+            let chunkData: ChunkData | null;
             if (this.prefetchQueue.has(this.currentChunk)) {
                 chunkData = await this.prefetchQueue.get(this.currentChunk)!;
                 this.prefetchQueue.delete(this.currentChunk);
@@ -517,36 +426,29 @@ class OptimizedDatabaseMediaStream extends Readable {
                 this.destroy(new Error(`Missing chunk ${this.currentChunk} for file ${this.fileId}`));
                 return;
             }
+            if (this.destroyed) { this.isReading = false; return; }
 
-            if (this.destroyed) {
-                chunkData = null;
-                this.isReading = false;
-                return;
-            }
-
-            // Calculate slice boundaries
+            const bufLen = chunkData.buffer.length;
             const chunkStartByte = this.getChunkStartByte(this.currentChunk);
-            const actualChunkSize = this.getChunkActualSize(this.currentChunk);
 
             let sliceStart = 0;
-            let sliceEnd = actualChunkSize;
+            let sliceEnd = bufLen;
 
-            // If this is the first chunk in the range, adjust for start offset
-            if (this.currentChunk === Math.floor(this.startOffset / this.fileChunkSize)) {
+            // Adjust for the requested byte range's start within this chunk
+            const rangeStartChunk = Math.floor(this.startOffset / this.fileChunkSize);
+            if (this.currentChunk === rangeStartChunk) {
                 sliceStart = this.startOffset - chunkStartByte;
             }
 
-            // If this is the last chunk in the range, adjust for end offset
-            if (this.currentChunk === Math.floor(this.endOffset / this.fileChunkSize)) {
-                const endInChunk = this.endOffset - chunkStartByte;
-                sliceEnd = endInChunk + 1;
+            // Adjust for the requested byte range's end within this chunk
+            const rangeEndChunk = Math.floor(this.endOffset / this.fileChunkSize);
+            if (this.currentChunk === rangeEndChunk) {
+                sliceEnd = Math.min(bufLen, this.endOffset - chunkStartByte + 1);
             }
 
-            // Ensure slice bounds are within the buffer
-            sliceStart = Math.max(0, Math.min(sliceStart, chunkData.buffer.length));
-            sliceEnd = Math.max(0, Math.min(sliceEnd, chunkData.buffer.length));
+            sliceStart = Math.max(0, Math.min(sliceStart, bufLen));
+            sliceEnd = Math.max(0, Math.min(sliceEnd, bufLen));
 
-            // If sliceStart >= sliceEnd, no data to send for this chunk
             if (sliceStart >= sliceEnd) {
                 this.currentChunk++;
                 this.isReading = false;
@@ -554,40 +456,21 @@ class OptimizedDatabaseMediaStream extends Readable {
                 return;
             }
 
-            // Use subarray for memory efficiency
             const dataToSend = chunkData.buffer.subarray(sliceStart, sliceEnd);
-
-            // Push to stream
             const canPush = this.push(dataToSend);
-
-            // Clear reference to help GC
-            chunkData = null;
-
+            chunkData = null; // help GC
             this.currentChunk++;
             this.isReading = false;
 
-            if (!this.destroyed && this.currentChunk <= this.endChunk) {
-                this.prefetchChunks();
-            }
-
-            if (canPush && this.currentChunk <= this.endChunk && !this.destroyed) {
-                setImmediate(() => this._read());
-            }
-
-        } catch (error) {
+            if (!this.destroyed && this.currentChunk <= this.endChunk) this.prefetchChunks();
+            if (canPush && this.currentChunk <= this.endChunk && !this.destroyed) setImmediate(() => this._read());
+        } catch (err) {
             this.isReading = false;
-            if (!this.destroyed) {
-                this.destroy(error as Error);
-            }
+            if (!this.destroyed) this.destroy(err as Error);
         }
     }
 
-    private cleanup(): void {
-        if (this.prefetchQueue.size > 0) {
-            this.prefetchQueue.clear();
-        }
-        this.prefetchQueue = new Map();
-    }
+    private cleanup(): void { this.prefetchQueue.clear(); }
 
     _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
         this.destroyed = true;

@@ -1,8 +1,15 @@
+/**
+ * @upload-media/client - Vanilla JS Test Harness
+ * Full implementation with pause, resume, cancel, retry, and gallery
+ */
+
 import {
     useUploadActions,
     useUploadProgress,
     setUploadMediaConfig,
 } from '@upload-media/client'
+
+// ─── DOM Elements ──────────────────────────────────────────────────────────
 
 const fileInput = document.getElementById('fileInput');
 const uploadBtn = document.getElementById('uploadBtn');
@@ -14,12 +21,36 @@ const uploadList = document.getElementById('uploadList');
 const dropZone = document.getElementById('dropZone');
 const gallery = document.getElementById('gallery');
 const galleryContent = document.getElementById('galleryContent');
-const videoGallery = document.getElementById('videoGallery');
-const videoGalleryContent = document.getElementById('videoGalleryContent');
 
-const { initializeUpload } = useUploadActions();
+// ─── Store Actions ──────────────────────────────────────────────────────────
 
-// Configure toast notifications
+const {
+    initializeUpload,
+    pauseUpload,
+    resumeUpload,
+    cancelUpload,
+    retryUpload,
+    removeUpload,
+    clearCompleted,
+    clearFailed,
+    clearAll,
+    checkForResumableUploads,
+} = useUploadActions();
+
+// ─── Quality Presets ──────────────────────────────────────────────────────
+
+export const YOUTUBE_VIDEO_QUALITIES = [
+    { id: '4k', label: '4K (2160p)', quality: 'high', resolution: '2160p', width: 3840, height: 2160, videoBitrate: '16000k', audioBitrate: '256k', codec: 'h264' },
+    { id: '1440p', label: '1440p', quality: 'high', resolution: '1440p', width: 2560, height: 1440, videoBitrate: '8000k', audioBitrate: '192k', codec: 'h264' },
+    { id: '1080p', label: 'Full HD (1080p)', quality: 'high', resolution: '1080p', width: 1920, height: 1080, videoBitrate: '4000k', audioBitrate: '192k', codec: 'h264' },
+    { id: '720p', label: 'HD (720p)', quality: 'medium', resolution: '720p', width: 1280, height: 720, videoBitrate: '2000k', audioBitrate: '128k', codec: 'h264' },
+    { id: '480p', label: 'SD (480p)', quality: 'medium', resolution: '480p', width: 854, height: 480, videoBitrate: '1000k', audioBitrate: '96k', codec: 'h264' },
+    { id: '360p', label: 'Low (360p)', quality: 'low', resolution: '360p', width: 640, height: 360, videoBitrate: '500k', audioBitrate: '64k', codec: 'h264' },
+    { id: '240p', label: 'Very Low (240p)', quality: 'low', resolution: '240p', width: 426, height: 240, videoBitrate: '250k', audioBitrate: '32k', codec: 'h264' }
+];
+
+// ─── Toast Configuration ──────────────────────────────────────────────────
+
 setUploadMediaConfig({
     showToast: {
         success: (msg) => console.log("✅ Success:", msg),
@@ -29,9 +60,8 @@ setUploadMediaConfig({
     }
 });
 
-// ============================================================
-// 1. VIDEO UPLOAD (Chunked - Default)
-// ============================================================
+// ─── 1. CHUNKED UPLOAD (Via Worker) ──────────────────────────────────────
+
 uploadBtn.addEventListener('click', () => {
     const files = Array.from(fileInput.files);
     if (files.length === 0) {
@@ -39,9 +69,8 @@ uploadBtn.addEventListener('click', () => {
         return;
     }
 
-    // Check if any video files are selected
-    const hasVideo = files.some(f => f.type.startsWith('video/'));
-    const uploadType = hasVideo ? 'video' : 'avatar';
+    const file = files[0];
+    const uploadType = file.type.startsWith('video/') ? 'video' : file.type.startsWith('audio/') ? 'audio' : 'avatar';
     const uploadId = 'upload_' + uploadType + '_' + Date.now();
 
     console.log(`🚀 Starting ${uploadType.toUpperCase()} upload:`, uploadId);
@@ -52,7 +81,6 @@ uploadBtn.addEventListener('click', () => {
         filenameArray: files.map(f => f.name),
         endpoint: `http://localhost:3000/api/upload?uploadType=${uploadType}`,
         method: 'POST',
-        // Custom metadata
         metadata: {
             uploadType: uploadType,
             timestamp: new Date().toISOString()
@@ -60,45 +88,8 @@ uploadBtn.addEventListener('click', () => {
     });
 });
 
-// ============================================================
-// 2. VIDEO UPLOAD WITH THUMBNAILS
-// ============================================================
-const uploadVideoThumbBtn = document.getElementById('uploadVideoThumbBtn');
-if (uploadVideoThumbBtn) {
-    uploadVideoThumbBtn.addEventListener('click', () => {
-        const files = Array.from(fileInput.files);
-        if (files.length === 0) {
-            alert('Please select files');
-            return;
-        }
+// ─── 2. DIRECT UPLOAD (Non-Chunked) ──────────────────────────────────────
 
-        const videoFiles = files.filter(f => f.type.startsWith('video/'));
-        if (videoFiles.length === 0) {
-            alert('Please select at least one video file');
-            return;
-        }
-
-        const uploadId = 'upload_thumb_' + Date.now();
-        console.log('🎬 Starting VIDEO UPLOAD with thumbnails:', uploadId);
-
-        initializeUpload({
-            uploadId,
-            blobs: videoFiles,
-            filenameArray: videoFiles.map(f => f.name),
-            endpoint: 'http://localhost:3000/api/upload?uploadType=video&generateThumbnails=true',
-            method: 'POST',
-            metadata: {
-                generateThumbnails: true,
-                thumbnailCount: 3,
-                thumbnailSize: '320x180'
-            }
-        });
-    });
-}
-
-// ============================================================
-// 3. NON-CHUNKED UPLOAD (Direct - for small files)
-// ============================================================
 uploadDirectBtn.addEventListener('click', async () => {
     const files = Array.from(fileInput.files);
     if (files.length === 0) {
@@ -116,11 +107,8 @@ uploadDirectBtn.addEventListener('click', async () => {
             const formData = new FormData();
             formData.append('file', file);
 
-            // Determine upload type based on file
-            const uploadType = file.type.startsWith('video/') ? 'video' : 'avatar';
+            const uploadType = file.type.startsWith('video/') ? 'video' : file.type.startsWith('audio/') ? 'audio' : 'avatar';
             formData.append('uploadType', uploadType);
-
-            // Add custom metadata
             formData.append('metadata', JSON.stringify({
                 originalName: file.name,
                 fileSize: file.size,
@@ -142,15 +130,16 @@ uploadDirectBtn.addEventListener('click', async () => {
             const result = await response.json();
             console.log(`✅ Direct upload success:`, result);
 
-            // Add to gallery based on file type
             if (result.file) {
                 const fileData = result.file;
                 const url = fileData.url || `http://localhost:3000/uploads/${uploadType}/${fileData.id}`;
 
                 if (file.type.startsWith('image/')) {
-                    addToGallery(file.name, url);
+                    addToGallery(file.name, url, 'image');
                 } else if (file.type.startsWith('video/')) {
-                    addToVideoGallery(file.name, url, fileData.thumbnailUrl);
+                    addToGallery(file.name, url, 'video');
+                } else if (file.type.startsWith('audio/')) {
+                    addToGallery(file.name, url, 'audio');
                 }
             }
         } catch (error) {
@@ -159,9 +148,8 @@ uploadDirectBtn.addEventListener('click', async () => {
     }
 });
 
-// ============================================================
-// 4. MULTI-FIELD UPLOAD (Post with Image + Video)
-// ============================================================
+// ─── 3. MULTI-FIELD UPLOAD ──────────────────────────────────────────────
+
 uploadFieldsBtn.addEventListener('click', () => {
     const files = Array.from(fileInput.files);
     if (files.length < 2) {
@@ -172,7 +160,6 @@ uploadFieldsBtn.addEventListener('click', () => {
     const uploadId = 'upload_fields_' + Date.now();
     console.log('🚀 Starting MULTI-FIELD upload:', uploadId);
 
-    // Map files to fieldnames based on their type
     const fieldnames = files.map(f => {
         if (f.type.startsWith('video/')) return 'postVideos';
         if (f.type.startsWith('image/')) return 'postImage';
@@ -193,9 +180,8 @@ uploadFieldsBtn.addEventListener('click', () => {
     });
 });
 
-// ============================================================
-// 5. TRANSFORMED VIDEO UPLOAD (Quality/Format conversion)
-// ============================================================
+// ─── 4. TRANSFORMED UPLOAD ──────────────────────────────────────────────
+
 uploadTransBtn.addEventListener('click', () => {
     const files = Array.from(fileInput.files);
     if (files.length === 0) {
@@ -203,42 +189,64 @@ uploadTransBtn.addEventListener('click', () => {
         return;
     }
 
-    const videoFiles = files.filter(f => f.type.startsWith('video/'));
-    if (videoFiles.length === 0) {
-        alert('Please select at least one video file');
+    const file = files[0];
+    const isVideo = file.type.startsWith('video/');
+    const isImage = file.type.startsWith('image/');
+    const isAudio = file.type.startsWith('audio/');
+    const uploadType = isVideo ? 'video' : isAudio ? 'audio' : 'avatar';
+
+    if (!isVideo && !isImage && !isAudio) {
+        alert('Please select an image, audio, or video file to transform');
         return;
     }
 
     const uploadId = 'upload_trans_' + Date.now();
-    console.log('🔄 Starting TRANSFORMED video upload:', uploadId);
+    console.log(`🔄 Starting TRANSFORMED ${isVideo ? 'video' : isAudio ? 'audio' : 'image'} upload:`, uploadId);
+
+    let transformer;
+    if (isVideo) {
+        transformer = {
+            type: 'video',
+            codec: 'h264',
+            bitrate: '2M',
+            fps: 30,
+            resolution: '1280x720',
+            format: 'video/mp4',
+            quality: 'high'
+        };
+    } else if (isAudio) {
+        transformer = {
+            type: 'audio',
+            format: 'audio/mp3',
+            audioBitrate: '192k',
+            quality: 'high'
+        };
+    } else {
+        transformer = {
+            type: 'image',
+            width: 800,
+            height: 800,
+            format: 'image/webp',
+            quality: 'high'
+        };
+    }
 
     initializeUpload({
         uploadId,
-        blobs: videoFiles,
-        filenameArray: videoFiles.map(f => f.name),
-        endpoint: 'http://localhost:3000/api/upload?uploadType=video',
+        blobs: [file],
+        filenameArray: [file.name],
+        endpoint: `http://localhost:3000/api/upload?uploadType=${uploadType}`,
         method: 'POST',
-        transformer: {
-            // Video transformation options
-            video: {
-                codec: 'h264',
-                bitrate: '2M',
-                fps: 30,
-                resolution: '1280x720'
-            },
-            format: 'video/mp4',
-            quality: 'high'
-        },
+        transformer,
         metadata: {
             transformed: true,
-            originalFormat: videoFiles[0]?.type || 'unknown'
+            originalFormat: file.type || 'unknown'
         }
     });
 });
 
-// ============================================================
-// 6. MULTI-QUALITY VIDEO UPLOAD (Multiple quality levels)
-// ============================================================
+// ─── 5. MULTI-QUALITY UPLOAD ─────────────────────────────────────────────
+
 uploadMultiBtn.addEventListener('click', () => {
     const files = Array.from(fileInput.files);
     if (files.length === 0) {
@@ -246,39 +254,69 @@ uploadMultiBtn.addEventListener('click', () => {
         return;
     }
 
-    const videoFiles = files.filter(f => f.type.startsWith('video/'));
-    if (videoFiles.length === 0) {
-        alert('Please select at least one video file');
+    const file = files[0];
+    const isVideo = file.type.startsWith('video/');
+    const isImage = file.type.startsWith('image/');
+    const isAudio = file.type.startsWith('audio/');
+    const uploadType = isVideo ? 'video' : isAudio ? 'audio' : 'avatar';
+
+    if (!isVideo && !isImage && !isAudio) {
+        alert('Please select an image, audio, or video file for multi-quality');
         return;
     }
 
     const uploadId = 'upload_multi_' + Date.now();
-    console.log('📊 Starting MULTI-QUALITY video upload:', uploadId);
+    console.log(`📊 Starting MULTI-QUALITY ${isVideo ? 'video' : isAudio ? 'audio' : 'image'} upload:`, uploadId);
+
+    let transformer;
+    if (isVideo) {
+        transformer = {
+            type: 'video',
+            qualities: ['1080p', '720p', '360p', '480p'],
+            format: 'video/mp4',
+            generateThumbnail: true,
+            thumbnailTimeSeconds: 5,
+            auto: false
+        };
+    } else if (isAudio) {
+        transformer = {
+            type: 'audio',
+            qualityConfigs: [
+                // Spotify-like realistic streaming bitrates to prioritize small size over perfect quality
+                { id: 'high', audioBitrate: '128k', format: 'mp3' },
+                { id: 'medium', audioBitrate: '96k', format: 'mp3' },
+                { id: 'low', audioBitrate: '64k', format: 'mp3' }
+            ],
+            auto: false
+        };
+    } else {
+        transformer = {
+            type: 'image',
+            qualityConfigs: [
+                { id: 'large', width: 1920, format: 'webp', quality: 90 },
+                { id: 'medium', width: 1280, format: 'webp', quality: 80 },
+                { id: 'thumbnail', width: 320, format: 'webp', quality: 60 }
+            ],
+            auto: false
+        };
+    }
 
     initializeUpload({
         uploadId,
-        blobs: videoFiles,
-        filenameArray: videoFiles.map(f => f.name),
-        endpoint: 'http://localhost:3000/api/upload?uploadType=video',
+        blobs: [file],
+        filenameArray: [file.name],
+        endpoint: `http://localhost:3000/api/upload?uploadType=${uploadType}`,
         method: 'POST',
-        transformer: {
-            qualities: ['1080p', '720p', '480p', '360p'],
-            format: 'video/mp4',
-            video: {
-                codec: 'h264',
-                adaptiveBitrate: true
-            }
+        postData: {
+            title: 'My Media',
+            description: 'A great upload'
         },
-        metadata: {
-            multiQuality: true,
-            qualities: ['1080p', '720p', '480p', '360p']
-        }
+        transformer
     });
 });
 
-// ============================================================
-// 7. DRAG & DROP
-// ============================================================
+// ─── 6. DRAG & DROP ──────────────────────────────────────────────────────
+
 dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     dropZone.classList.add('drag-over');
@@ -297,9 +335,8 @@ dropZone.addEventListener('drop', (e) => {
     }
 });
 
-// ============================================================
-// 8. FILE INPUT CHANGE HANDLER
-// ============================================================
+// ─── 7. FILE INPUT CHANGE ──────────────────────────────────────────────
+
 fileInput.addEventListener('change', (e) => {
     if (e.target.files.length > 0) {
         updateFileList(e.target.files);
@@ -321,67 +358,11 @@ function updateFileList(files) {
     });
 }
 
-// ============================================================
-// 9. REAL-TIME PROGRESS SUBSCRIPTION
-// ============================================================
-useUploadProgress.subscribe((state) => {
-    uploadList.innerHTML = '';
+// ─── 8. GALLERY HELPERS ──────────────────────────────────────────────────
 
-    if (!state.uploads || !Array.isArray(state.uploads)) return;
-
-    state.uploads.forEach(upload => {
-        const item = document.createElement('div');
-        item.className = 'upload-item';
-
-        const progress = Math.round(upload.overallProgress || 0);
-        const status = upload.status || 'pending';
-        const name = upload.fileName || 'Unknown File';
-        const fileType = upload.fileType || '';
-
-        // Determine upload mode and type
-        const isChunked = upload.uploadId?.includes('chunked') || upload.chunkCount > 1;
-        const isVideo = fileType.startsWith('video/');
-        const modeLabel = isChunked ? '📦 Chunked' : '📄 Direct';
-        const typeIcon = isVideo ? '🎬' : '🖼️';
-
-        item.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                <span><strong>${typeIcon} ${name}</strong></span>
-                <span>${progress}%</span>
-            </div>
-            <div class="progress-container" style="background: #e2e8f0; border-radius: 4px; overflow: hidden; height: 8px; width: 100%;">
-                <div class="progress-bar" style="width: ${progress}%; background: ${isVideo ? '#8b5cf6' : '#3b82f6'}; height: 100%; transition: width 0.2s ease;"></div>
-            </div>
-            <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-top: 0.5rem; color: #94a3b8">
-                <span>${modeLabel}</span>
-                <span>Status: <strong style="color: ${status === 'completed' ? '#10b981' : status === 'error' ? '#ef4444' : '#6b7280'}">${status}</strong></span>
-                <span>${isVideo ? '🎬 Video' : '🖼️ Image'}</span>
-            </div>
-        `;
-        uploadList.appendChild(item);
-
-        // ✅ If completed, add to appropriate gallery
-        if (status === 'completed' && upload.fileId) {
-            const baseUrl = `http://localhost:3000/uploads/${upload.uploadType || 'avatar'}`;
-            const url = upload.url || `${baseUrl}/${upload.fileId}`;
-
-            if (fileType.startsWith('image/')) {
-                addToGallery(name, url);
-            } else if (fileType.startsWith('video/')) {
-                const thumbnailUrl = upload.thumbnailUrl || `${baseUrl}/thumbnails/${upload.fileId}`;
-                addToVideoGallery(name, url, thumbnailUrl);
-            }
-        }
-    });
-});
-
-// ============================================================
-// 10. IMAGE GALLERY HELPER
-// ============================================================
-function addToGallery(filename, url) {
+function addToGallery(filename, url, type = 'image') {
     if (!galleryContent) return;
 
-    // Check if already in gallery
     if (galleryContent.querySelector(`[data-url="${url}"]`)) {
         return;
     }
@@ -390,55 +371,303 @@ function addToGallery(filename, url) {
 
     const item = document.createElement('div');
     item.setAttribute('data-url', url);
-    item.style.cssText = 'margin: 10px; text-align: center; display: inline-block;';
+    item.style.cssText = 'margin: 10px; text-align: center; display: inline-block; vertical-align: top; max-width: 220px;';
+
+    let mediaHtml = '';
+    if (type === 'video') {
+        mediaHtml = `
+            <video src="${url}" 
+                   controls 
+                   style="max-width: 200px; max-height: 200px; border-radius: 8px; object-fit: cover; border: 2px solid #e2e8f0; background: #000;"
+                   onerror="this.style.display='none'; this.nextElementSibling.textContent='Failed to load video'"
+            ></video>
+        `;
+    } else if (type === 'audio') {
+        mediaHtml = `
+            <audio src="${url}" 
+                   controls 
+                   style="width: 200px; display: block; border-radius: 8px;"
+                   onerror="this.style.display='none'; this.nextElementSibling.textContent='Failed to load audio'"
+            ></audio>
+        `;
+    } else {
+        mediaHtml = `
+            <img src="${url}" 
+                 alt="${filename}" 
+                 style="max-width: 200px; max-height: 200px; border-radius: 8px; object-fit: cover; border: 2px solid #e2e8f0;"
+                 onerror="this.style.display='none'; this.nextElementSibling.textContent='Failed to load image'"
+            >
+        `;
+    }
 
     item.innerHTML = `
-        <img src="${url}" 
-             alt="${filename}" 
-             style="max-width: 200px; max-height: 200px; border-radius: 8px; object-fit: cover; border: 2px solid #e2e8f0;"
-             onerror="this.style.display='none'; this.nextElementSibling.textContent='Failed to load'"
-        >
-        <p style="font-size: 0.8rem; margin-top: 4px; color: #6b7280; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${filename}</p>
+        ${mediaHtml}
+        <p style="font-size: 0.8rem; margin-top: 4px; color: #6b7280; width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${filename}">${filename}</p>
     `;
 
     galleryContent.appendChild(item);
 }
 
-// ============================================================
-// 11. VIDEO GALLERY HELPER
-// ============================================================
-function addToVideoGallery(filename, url, thumbnailUrl) {
-    if (!videoGalleryContent) return;
+// ─── 9. REAL-TIME PROGRESS WITH CONTROLS ──────────────────────────────
 
-    // Check if already in gallery
-    if (videoGalleryContent.querySelector(`[data-url="${url}"]`)) {
-        return;
-    }
+useUploadProgress.subscribe((state) => {
+    if (!uploadList) return;
+    uploadList.innerHTML = '';
 
-    if (videoGallery) videoGallery.style.display = 'block';
+    if (!state.uploads || !Array.isArray(state.uploads)) return;
 
-    const item = document.createElement('div');
-    item.setAttribute('data-url', url);
-    item.style.cssText = 'margin: 10px; text-align: center; display: inline-block;';
+    // Show uploads in reverse order (newest first)
+    const uploads = [...state.uploads].reverse();
 
-    const thumbnail = thumbnailUrl || url;
+    uploads.forEach(upload => {
+        const item = document.createElement('div');
+        item.className = 'upload-item';
+        item.style.cssText = `
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 12px;
+            transition: all 0.2s ease;
+        `;
 
-    item.innerHTML = `
-        <div style="position: relative; cursor: pointer;" onclick="this.querySelector('video').play();">
-            <video 
-                src="${url}" 
-                poster="${thumbnail}"
-                style="max-width: 200px; max-height: 200px; border-radius: 8px; object-fit: cover; border: 2px solid #e2e8f0; background: #000;"
-                controls
-                preload="metadata"
-            ></video>
-            <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 48px; color: white; text-shadow: 0 0 10px rgba(0,0,0,0.5); pointer-events: none;">▶</div>
-        </div>
-        <p style="font-size: 0.8rem; margin-top: 4px; color: #6b7280; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${filename}</p>
-    `;
+        const progress = Math.round(upload.overallProgress || 0);
+        const status = upload.status || 'pending';
+        const name = upload.fileName || 'Unknown File';
+        const fileType = upload.fileType || '';
+        const isVideo = fileType.startsWith('video/');
+        const isAudio = fileType.startsWith('audio/');
+        const isChunked = upload.uploadId?.includes('chunked') || upload.uploadId?.includes('upload_');
+        const modeLabel = isChunked ? '📦 Chunked' : '📄 Direct';
+        const typeIcon = isVideo ? '🎬' : isAudio ? '🎵' : '🖼️';
+        const speed = upload.speed ? `${(upload.speed * 100).toFixed(1)}%/s` : '—';
+        const timeRemaining = upload.timeRemaining ? `${Math.ceil(upload.timeRemaining)}s` : '—';
 
-    videoGalleryContent.appendChild(item);
+        // Status colors
+        const statusColors = {
+            'pending': '#94a3b8',
+            'initializing': '#f59e0b',
+            'uploading': '#3b82f6',
+            'paused': '#8b5cf6',
+            'completed': '#10b981',
+            'failed': '#ef4444',
+            'cancelled': '#6b7280',
+            'processing': '#f59e0b',
+            'error': '#ef4444'
+        };
+        const statusColor = statusColors[status] || '#94a3b8';
+
+        // ─── Build HTML with controls ──────────────────────────────
+        let controlsHTML = '';
+
+        if (status === 'uploading' || status === 'initializing') {
+            controlsHTML = `
+                <button class="btn-pause" data-uploadid="${upload.uploadId}" style="background: #f59e0b; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                    ⏸️ Pause
+                </button>
+            `;
+        } else if (status === 'paused') {
+            controlsHTML = `
+                <button class="btn-resume" data-uploadid="${upload.uploadId}" style="background: #3b82f6; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                    ▶️ Resume
+                </button>
+                <button class="btn-cancel" data-uploadid="${upload.uploadId}" style="background: #ef4444; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; margin-left: 6px;">
+                    ✖️ Cancel
+                </button>
+            `;
+        } else if (status === 'failed') {
+            controlsHTML = `
+                <button class="btn-retry" data-uploadid="${upload.uploadId}" style="background: #10b981; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                    🔄 Retry
+                </button>
+                <button class="btn-remove" data-uploadid="${upload.uploadId}" style="background: #6b7280; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; margin-left: 6px;">
+                    🗑️ Remove
+                </button>
+            `;
+        } else if (status === 'completed') {
+            controlsHTML = `
+                <button class="btn-remove" data-uploadid="${upload.uploadId}" style="background: #6b7280; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                    🗑️ Remove
+                </button>
+            `;
+        } else if (status === 'cancelled') {
+            controlsHTML = `
+                <button class="btn-remove" data-uploadid="${upload.uploadId}" style="background: #6b7280; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                    🗑️ Remove
+                </button>
+            `;
+        }
+
+        item.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+                <div style="flex: 1; min-width: 150px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-weight: 600; font-size: 0.95rem;">${typeIcon} ${name}</span>
+                        <span style="font-size: 0.7rem; background: #e2e8f0; padding: 2px 8px; border-radius: 12px; color: #475569;">${modeLabel}</span>
+                    </div>
+                    <div style="font-size: 0.75rem; color: #94a3b8; margin-top: 2px;">
+                        ${isVideo ? '🎬 Video' : isAudio ? '🎵 Audio' : '🖼️ Image'} • ${(upload.fileSize || 0) > 0 ? (upload.fileSize / 1024 / 1024).toFixed(2) : '—'} MB
+                        ${upload.retryCount > 0 ? `• 🔄 Retry ${upload.retryCount}` : ''}
+                    </div>
+                </div>
+                <div style="text-align: right; min-width: 100px;">
+                    <span style="font-size: 1.2rem; font-weight: 700; color: ${statusColor};">${progress}%</span>
+                    <div style="font-size: 0.7rem; color: #94a3b8;">
+                        ⚡ ${speed} • ⏱️ ${timeRemaining}
+                    </div>
+                </div>
+            </div>
+
+            <div style="position: relative; width: 100%; background: #e2e8f0; border-radius: 6px; height: 8px; overflow: hidden; margin: 8px 0;">
+                <div style="width: ${progress}%; background: ${status === 'completed' ? '#10b981' : status === 'failed' ? '#ef4444' : status === 'paused' ? '#8b5cf6' : '#3b82f6'}; height: 100%; transition: width 0.3s ease; border-radius: 6px;"></div>
+            </div>
+
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span style="font-size: 0.75rem; color: ${statusColor}; font-weight: 500;">
+                        ${status.toUpperCase()}
+                    </span>
+                    ${upload.error ? `<span style="font-size: 0.7rem; color: #ef4444;">⚠️ ${upload.error}</span>` : ''}
+                </div>
+                <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                    ${controlsHTML}
+                </div>
+            </div>
+
+            ${upload.files && upload.files.length > 1 ? `
+                <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #e2e8f0; font-size: 0.7rem; color: #94a3b8;">
+                    📎 ${upload.files.length} files
+                    ${upload.files.map((f, i) => `<span key="${i}">${f.fileName} (${Math.round(f.progress || 0)}%)</span>`).join(' • ')}
+                </div>
+            ` : ''}
+        `;
+
+        uploadList.appendChild(item);
+
+        // ─── Attach event listeners ────────────────────────────────
+        const pauseBtn = item.querySelector('.btn-pause');
+        const resumeBtn = item.querySelector('.btn-resume');
+        const cancelBtn = item.querySelector('.btn-cancel');
+        const retryBtn = item.querySelector('.btn-retry');
+        const removeBtn = item.querySelector('.btn-remove');
+
+        if (pauseBtn) {
+            pauseBtn.addEventListener('click', () => {
+                const id = pauseBtn.dataset.uploadid;
+                console.log(`⏸️ Pausing upload: ${id}`);
+                pauseUpload(id);
+            });
+        }
+
+        if (resumeBtn) {
+            resumeBtn.addEventListener('click', () => {
+                const id = resumeBtn.dataset.uploadid;
+                console.log(`▶️ Resuming upload: ${id}`);
+                resumeUpload(id);
+            });
+        }
+
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', () => {
+                const id = cancelBtn.dataset.uploadid;
+                console.log(`✖️ Cancelling upload: ${id}`);
+                cancelUpload(id);
+            });
+        }
+
+        if (retryBtn) {
+            retryBtn.addEventListener('click', () => {
+                const id = retryBtn.dataset.uploadid;
+                console.log(`🔄 Retrying upload: ${id}`);
+                retryUpload(id);
+            });
+        }
+
+        if (removeBtn) {
+            removeBtn.addEventListener('click', () => {
+                const id = removeBtn.dataset.uploadid;
+                console.log(`🗑️ Removing upload: ${id}`);
+                removeUpload(id);
+            });
+        }
+
+        // ─── If completed, add to gallery ──────────────────────────
+        if (status === 'completed' && upload.fileId) {
+            const baseUrl = `http://localhost:3000/uploads/${upload.uploadType || 'avatar'}`;
+            const url = upload.url || `${baseUrl}/${upload.fileId}`;
+
+            if (fileType.startsWith('image/')) {
+                addToGallery(name, url, 'image');
+            } else if (fileType.startsWith('video/')) {
+                addToGallery(name, url, 'video');
+            } else if (fileType.startsWith('audio/')) {
+                addToGallery(name, url, 'audio');
+            }
+        }
+    });
+});
+
+// ─── 10. BULK ACTIONS ──────────────────────────────────────────────────
+
+// Add bulk action buttons to the UI
+const bulkActions = document.createElement('div');
+bulkActions.style.cssText = 'display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap;';
+bulkActions.innerHTML = `
+    <button id="clearCompletedBtn" class="btn secondary" style="background: #10b981;">✅ Clear Completed</button>
+    <button id="clearFailedBtn" class="btn secondary" style="background: #ef4444;">❌ Clear Failed</button>
+    <button id="clearAllBtn" class="btn secondary" style="background: #6b7280;">🗑️ Clear All</button>
+    <button id="checkResumeBtn" class="btn secondary" style="background: #8b5cf6;">🔄 Check Resumable</button>
+`;
+
+// Insert after upload list
+if (uploadList) {
+    uploadList.parentNode.insertBefore(bulkActions, uploadList.nextSibling);
 }
+
+document.getElementById('clearCompletedBtn')?.addEventListener('click', () => {
+    console.log('🧹 Clearing completed uploads...');
+    clearCompleted();
+});
+
+document.getElementById('clearFailedBtn')?.addEventListener('click', () => {
+    console.log('🧹 Clearing failed uploads...');
+    clearFailed();
+});
+
+document.getElementById('clearAllBtn')?.addEventListener('click', () => {
+    if (confirm('Are you sure you want to clear ALL uploads?')) {
+        console.log('🧹 Clearing ALL uploads...');
+        clearAll();
+    }
+});
+
+document.getElementById('checkResumeBtn')?.addEventListener('click', () => {
+    console.log('🔄 Checking for resumable uploads...');
+    checkForResumableUploads();
+});
+
+// ─── 11. KEYBOARD SHORTCUTS ───────────────────────────────────────────
+
+document.addEventListener('keydown', (e) => {
+    // Ctrl+Shift+C = Clear completed
+    if (e.ctrlKey && e.shiftKey && e.key === 'C') {
+        document.getElementById('clearCompletedBtn')?.click();
+    }
+    // Ctrl+Shift+F = Clear failed
+    if (e.ctrlKey && e.shiftKey && e.key === 'F') {
+        document.getElementById('clearFailedBtn')?.click();
+    }
+    // Ctrl+Shift+A = Clear all
+    if (e.ctrlKey && e.shiftKey && e.key === 'A') {
+        document.getElementById('clearAllBtn')?.click();
+    }
+    // Ctrl+Shift+R = Check resumable
+    if (e.ctrlKey && e.shiftKey && e.key === 'R') {
+        document.getElementById('checkResumeBtn')?.click();
+    }
+});
+
+// ─── 12. INITIALIZATION ─────────────────────────────────────────────────
 
 console.log('📹 Video Upload System Ready!');
 console.log('🖼️ Image Gallery: Supported');
@@ -446,3 +675,10 @@ console.log('🎬 Video Gallery: Supported');
 console.log('📦 Chunked Uploads: Supported');
 console.log('🔄 Video Transformation: Supported');
 console.log('📊 Multi-Quality Videos: Supported');
+console.log('⏸️ Pause/Resume/Cancel: Supported');
+console.log('🔄 Retry: Supported');
+console.log('🧹 Clear Actions: Supported');
+console.log('⌨️ Keyboard Shortcuts: Ctrl+Shift+C/F/A/R');
+
+// Check for resumable uploads on load
+checkForResumableUploads().catch(console.error);

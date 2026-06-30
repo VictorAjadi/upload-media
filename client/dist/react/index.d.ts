@@ -1,31 +1,6 @@
 import * as immer from 'immer';
 import * as zustand_middleware from 'zustand/middleware';
-import * as zustand_vanilla from 'zustand/vanilla';
-
-interface UploadMediaConfig {
-    getCookie?: () => Promise<string | null> | string | null;
-    encryptQueryString?: (data: any) => string | Promise<string>;
-    showToast: {
-        success: (msg: string) => void;
-        error: (msg: string) => void;
-        info: (msg: string) => void;
-        warning: (msg: string) => void;
-    };
-    videoState: {
-        getState: () => {
-            videos: Record<number, {
-                startTime?: number;
-                endTime?: number | null;
-                isMuted?: boolean;
-                videoDuration?: number | null;
-            }>;
-            clearVideoState: (key: string) => void;
-        };
-    };
-    customTransformer?: (blob: Blob, options: any, onProgress: (p: number) => void) => Promise<Blob | Record<string, Blob>>;
-}
-declare const setUploadMediaConfig: (config: Partial<UploadMediaConfig>) => void;
-declare const getUploadMediaConfig: () => UploadMediaConfig;
+import * as zustand from 'zustand';
 
 type UploadStatus = 'pending' | 'initializing' | 'uploading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'processing' | 'error';
 type Quality = 'high' | 'medium' | 'low' | number;
@@ -146,14 +121,6 @@ interface WorkerMessage {
     requestId?: string;
     [key: string]: any;
 }
-interface UploadResult {
-    status: 'success' | 'error';
-    uploadId: string;
-    message: string;
-    data?: any;
-    error?: string;
-    allFilesSessionId?: string[];
-}
 
 interface UploadProgressState {
     uploads: UploadProgress[];
@@ -212,7 +179,7 @@ interface InitializeUploadParams {
     uploadType: string;
     transformer?: any;
 }
-declare const useUploadProgress: Omit<Omit<zustand_vanilla.StoreApi<UploadProgressState>, "persist"> & {
+declare const useUploadProgress: Omit<Omit<zustand.StoreApi<UploadProgressState>, "persist"> & {
     persist: {
         setOptions: (options: Partial<zustand_middleware.PersistOptions<UploadProgressState, unknown>>) => void;
         clearStorage: () => void;
@@ -225,7 +192,18 @@ declare const useUploadProgress: Omit<Omit<zustand_vanilla.StoreApi<UploadProgre
 }, "setState"> & {
     setState(nextStateOrUpdater: UploadProgressState | Partial<UploadProgressState> | ((state: immer.WritableDraft<UploadProgressState>) => void), shouldReplace?: boolean | undefined): void;
 };
-declare const useUploadActions: () => {
+
+declare function useUpload(): {
+    uploads: UploadProgress[];
+    totalProgress: number;
+    activeUploads: number;
+    completedUploads: number;
+    failedUploads: number;
+    pausedUploads: number;
+    hasUploads: boolean;
+    hasActiveUploads: boolean;
+    canResumeAnyUpload: boolean;
+    upload: (files: File[], fieldnames: string[], options: UploadOptions) => Promise<string>;
     addUpload: (params: AddUploadParams) => void;
     initializeUpload: (params: InitializeUploadParams) => void;
     updateProgress: (uploadId: string, params: UpdateProgressParams) => void;
@@ -239,119 +217,23 @@ declare const useUploadActions: () => {
     clearAll: () => Promise<void>;
     checkForResumableUploads: () => Promise<void>;
     createWorker: (uploadId: string) => Worker;
+    terminateWorker: (uploadId: string) => void;
+    getUpload: (uploadId: string) => UploadProgress | undefined;
+    terminateAllWorkers: () => void;
 };
-declare const cleanupUploadResources: () => void;
 
 /**
- * UploadManager - Core upload orchestration class
- * Handles file uploads with chunking, resume, and worker management
+ * React hook for accessing upload state
  */
+declare function useUploadState(uploadId?: string): {
+    currentUpload: any;
+    allUploads: any;
+    totalProgress: any;
+    activeCount: any;
+    isActive: boolean;
+    isPaused: boolean;
+    isFailed: boolean;
+    isCompleted: boolean;
+};
 
-interface UploadManagerConfig {
-    workerUrl?: string;
-    onProgress?: (progress: UploadProgress) => void;
-    onComplete?: (result: UploadResult) => void;
-    onError?: (error: Error) => void;
-    storageKey?: string;
-}
-declare class UploadManager {
-    private worker;
-    private uploads;
-    private config;
-    private eventListeners;
-    constructor(config?: UploadManagerConfig);
-    /**
-     * Get default worker URL based on environment and format
-     */
-    private getDefaultWorkerUrl;
-    /**
-     * Fallback method to get worker URL without import.meta
-     */
-    private getWorkerUrlFallback;
-    /**
-     * Initialize and setup Web Worker
-     */
-    private initializeWorker;
-    /**
-     * Handle messages from Worker
-     */
-    private handleWorkerMessage;
-    /**
-     * Handle transformation request from worker
-     */
-    private handleTransformationRequest;
-    /**
-     * Upload files with optional chunking and resume support
-     */
-    upload(files: File[], fieldnames: string[], options: UploadOptions): Promise<UploadResult>;
-    /**
-     * Pause an active upload
-     */
-    pause(uploadId: string): void;
-    /**
-     * Resume a paused upload
-     */
-    resume(uploadId: string): void;
-    /**
-     * Cancel an upload
-     */
-    cancel(uploadId: string): void;
-    /**
-     * Remove upload from tracking
-     */
-    remove(uploadId: string): void;
-    /**
-     * Get all uploads
-     */
-    getUploads(): UploadProgress[];
-    /**
-     * Get specific upload
-     */
-    getUpload(uploadId: string): UploadProgress | undefined;
-    /**
-     * Event listener support
-     */
-    on(event: string, callback: Function): () => void;
-    /**
-     * Emit events
-     */
-    private emit;
-    /**
-     * Update upload progress
-     */
-    private updateProgress;
-    /**
-     * Handle upload completion
-     */
-    private handleUploadSuccess;
-    /**
-     * Handle upload error
-     */
-    private handleUploadError;
-    /**
-     * Handle token request from worker
-     */
-    private handleTokenRequest;
-    /**
-     * Provide token to worker
-     */
-    provideToken(token: string): void;
-    /**
-     * Save state to localStorage
-     */
-    private saveToStorage;
-    /**
-     * Restore state from localStorage
-     */
-    private restoreFromStorage;
-    /**
-     * Set worker URL dynamically (useful for consumers)
-     */
-    setWorkerUrl(url: string): void;
-    /**
-     * Cleanup and destroy
-     */
-    destroy(): void;
-}
-
-export { type AddUploadParams, type FileMetadata, type FileUploadItem, type InitializeUploadParams, type Quality, type QualityConfig, type TransformerConfig, type UpdateProgressParams, UploadManager, type UploadManagerConfig, type UploadMediaConfig, type UploadOptions, type UploadProgress, type UploadProgressState, type UploadResult, type UploadStatus, type WorkerMessage, cleanupUploadResources, getUploadMediaConfig, setUploadMediaConfig, useUploadActions, useUploadProgress };
+export { useUpload, useUploadProgress, useUploadState };

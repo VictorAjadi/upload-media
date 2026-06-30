@@ -1,4 +1,3 @@
-import { FFmpeg } from '@ffmpeg/ffmpeg';
 import * as immer from 'immer';
 import * as zustand_middleware from 'zustand/middleware';
 import * as zustand_vanilla from 'zustand/vanilla';
@@ -28,48 +27,40 @@ interface UploadMediaConfig {
 declare const setUploadMediaConfig: (config: Partial<UploadMediaConfig>) => void;
 declare const getUploadMediaConfig: () => UploadMediaConfig;
 
-/**
- * @upload-media/client - Type Definitions
- */
-type UploadStatus = 'pending' | 'initializing' | 'uploading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'modifying' | 'generating_thumbnail' | 'error';
-interface UploadOptions {
-    /** Upload endpoint URL */
-    endpoint: string;
-    /** HTTP method (POST or PATCH) */
-    method: 'POST' | 'PATCH';
-    /** Video/Image quality ('high', 'medium', 'low') */
-    quality?: 'high' | 'medium' | 'low';
-    /** Maximum number of files allowed */
-    maxFiles?: number;
-    /** Number of concurrent uploads */
-    concurrentUploads?: number;
-    /** Upload priority */
-    priority?: 'high' | 'normal' | 'low';
-    /** Whether to transform/process media */
-    transform?: boolean;
-    /** Custom upload ID */
-    uploadId?: string;
-    /** Additional form data to send */
-    postData?: Record<string, any>;
-    /** Request metadata */
-    metadata?: Record<string, any>[];
-    /** Video start time (for trimming) */
-    videoStartTime?: number | string;
-    /** Video end time (for trimming) */
-    videoEndTime?: number | string;
-    /** Video duration */
-    duration?: string;
-    /** Media transformation options */
-    transformer?: {
-        /** 0-100 quality for images, or specific quality type */
-        quality?: number | 'high' | 'medium' | 'low';
-        /** List of qualities to generate (multi-output) */
-        qualities?: (number | 'high' | 'medium' | 'low')[];
-        /** Auto-transform based on network or config */
-        auto?: boolean;
-        /** Output format if applicable */
-        format?: string;
-    };
+type UploadStatus = 'pending' | 'initializing' | 'uploading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'processing' | 'error';
+type Quality = 'high' | 'medium' | 'low' | number;
+interface QualityConfig {
+    id: string;
+    label: string;
+    quality?: Quality;
+    resolution?: string;
+    videoBitrate?: string;
+    audioBitrate?: string;
+    width?: number;
+    height?: number;
+    codec?: string;
+    maxDimension?: number;
+    format?: string;
+    [key: string]: any;
+}
+interface TransformerConfig {
+    type?: 'image' | 'video' | 'audio';
+    quality?: Quality;
+    format?: string;
+    qualityConfigs?: QualityConfig[];
+    qualities?: string[];
+    startTime?: number;
+    endTime?: number;
+    mute?: boolean;
+    videoBitrate?: string;
+    resolution?: string;
+    codec?: string;
+    generateThumbnail?: boolean;
+    thumbnailTimeSeconds?: number;
+    audioBitrate?: string;
+    width?: number;
+    height?: number;
+    [key: string]: any;
 }
 interface FileUploadItem {
     fileIndex: number;
@@ -82,15 +73,14 @@ interface FileUploadItem {
     status: UploadStatus;
     error?: string;
     sessionId?: string;
-    needsModification?: boolean;
-    isModified?: boolean;
-    modificationProgress?: number;
-    startTime?: number;
-    endTime?: number | null;
-    isMuted?: boolean;
-    videoDuration?: number | null;
-    needsTransformation?: boolean;
-    isTransformed?: boolean;
+    isProcessing?: boolean;
+    processingProgress?: number;
+    processedSize?: number;
+}
+interface FileMetadata {
+    size?: number;
+    type?: string;
+    fieldname?: string;
 }
 interface UploadProgress {
     uploadId: string;
@@ -113,13 +103,27 @@ interface UploadProgress {
     endpoint?: string;
     method?: string;
     postData?: Record<string, any>;
-    metadata?: any[];
-    modificationConfigs?: any[];
-    videoStartTime?: string;
-    videoEndTime?: string;
-    duration?: string;
-    currentModifyingIndex?: number;
+    metadata?: Array<FileMetadata>;
     uploadType?: string;
+}
+interface UploadOptions {
+    endpoint: string;
+    method: 'POST' | 'PATCH';
+    maxFiles?: number;
+    concurrentUploads?: number;
+    priority?: 'high' | 'normal' | 'low';
+    uploadId?: string;
+    postData?: Record<string, any>;
+    uploadType?: string;
+    metadata?: Array<FileMetadata>;
+    transformer?: TransformerConfig;
+}
+interface UpdateProgressParams {
+    progress: number;
+    status?: UploadStatus;
+    error?: string;
+    speed?: number;
+    timeRemaining?: number;
 }
 interface WorkerMessage {
     type: string;
@@ -131,7 +135,6 @@ interface WorkerMessage {
     progress?: string;
     overallProgress?: string;
     fileProgress?: string;
-    chunkProgress?: string;
     status?: UploadStatus;
     message?: string;
     error?: string;
@@ -140,27 +143,8 @@ interface WorkerMessage {
     canResume?: boolean;
     clearType?: 'all' | 'completed' | 'failed' | 'single';
     uploadIds?: string[];
-    modifiedBlob?: Blob;
-    blob?: Blob;
-    config?: any;
     requestId?: string;
     [key: string]: any;
-}
-interface UpdateProgressParams {
-    progress: number;
-    status?: UploadStatus;
-    error?: string;
-    speed?: number;
-    timeRemaining?: number;
-}
-interface ModificationConfig {
-    needsModification: boolean;
-    isModified?: boolean;
-    config?: {
-        type: 'image' | 'video';
-        quality?: 'high' | 'medium' | 'low';
-        videoKey?: string;
-    };
 }
 interface UploadResult {
     status: 'success' | 'error';
@@ -170,148 +154,7 @@ interface UploadResult {
     error?: string;
     allFilesSessionId?: string[];
 }
-interface TrimOptions {
-    startTime?: number | null;
-    endTime?: number | null;
-    quality?: 'high' | 'medium' | 'low';
-    mute?: boolean;
-    onProgress?: (progress: number) => void;
-    useFFmpeg?: boolean;
-    outputFormat?: 'mp4' | 'webm' | 'mkv' | 'mov' | 'avi' | 'flv';
-    fastMode?: boolean;
-}
-interface EventCallbacks {
-    onProgress?: (progress: number) => void;
-    onError?: (error: string) => void;
-    onComplete?: (result: Blob) => void;
-    onCancel?: () => void;
-}
-interface VideoMetadata {
-    duration: number;
-    width: number;
-    height: number;
-    hasAudio: boolean;
-    frameRate: number;
-    bitrate?: number;
-    codec?: string;
-    audioCodec?: string;
-}
-interface AudioTrimOptions {
-    startTime?: number | null;
-    endTime?: number | null;
-    quality?: 'high' | 'medium' | 'low';
-    onProgress?: (progress: number) => void;
-    useFFmpeg?: boolean;
-    outputFormat?: 'mp3' | 'wav' | 'aac' | 'ogg' | 'm4a';
-}
-interface AudioEventCallbacks {
-    onProgress?: (progress: number) => void;
-    onError?: (error: string) => void;
-    onComplete?: (result: Blob) => void;
-}
 
-declare class VideoTrimmer {
-    private callbacks;
-    private abortController;
-    private isProcessing;
-    private resources;
-    private ffmpeg;
-    private ffmpegLoaded;
-    constructor(callbacks?: EventCallbacks);
-    trimVideo(file: File, options: TrimOptions): Promise<Blob>;
-    private validateInputs;
-    private performTrimming;
-    private selectOptimalMethod;
-    private trimWithOptimizedFFmpeg;
-    loadFFmpeg(): Promise<FFmpeg>;
-    private trimWithWebCodecs;
-    private calculateWebCodecsBitrate;
-    private trimWithOptimizedRecording;
-    private getEnhancedVideoMetadata;
-    private validateTimeBounds;
-    private supportsWebCodecs;
-    private getSafeEncoderDimensions;
-    private createOptimizedVideo;
-    private seekToTime;
-    private addOptimizedAudio;
-    private getOptimalDimensions;
-    private getBestRecordingMimeType;
-    private getFileExtension;
-    private getMimeTypeFromFormat;
-    private calculateOptimalBitrate;
-    private emitProgress;
-    private cleanup;
-    cancel(): void;
-    isProcessingVideo(): boolean;
-    static trim(file: File, options: TrimOptions & {
-        preferredMethod?: 'auto' | 'ffmpeg' | 'webcodecs' | 'recording';
-    }): Promise<Blob>;
-    static getVideoInfo(file: File): Promise<VideoMetadata>;
-    static getCapabilities(): {
-        ffmpegSupported: boolean;
-        webCodecsSupported: boolean;
-        supportedInputFormats: string[];
-        supportedOutputFormats: string[];
-        recommendedMethod: string;
-    };
-    static estimateProcessingTime(file: File, trimDuration: number, method?: 'ffmpeg' | 'webcodecs' | 'recording', fastMode?: boolean): number;
-    static suggestOptimalSettings(file: File, trimDuration: number): {
-        quality: 'high' | 'medium' | 'low';
-        fastMode: boolean;
-        preferredMethod: 'ffmpeg' | 'webcodecs' | 'recording';
-        outputFormat: 'mp4' | 'webm';
-    };
-}
-declare const useVideoTrimmer: (callbacks?: EventCallbacks) => {
-    trimVideo: (file: File, options: TrimOptions) => Promise<Blob>;
-    getCapabilities: () => {
-        ffmpegSupported: boolean;
-        webCodecsSupported: boolean;
-        supportedInputFormats: string[];
-        supportedOutputFormats: string[];
-        recommendedMethod: string;
-    };
-    suggestSettings: (file: File, trimDuration: number) => {
-        quality: "high" | "medium" | "low";
-        fastMode: boolean;
-        preferredMethod: "ffmpeg" | "webcodecs" | "recording";
-        outputFormat: "mp4" | "webm";
-    };
-};
-
-interface AddUploadParams {
-    uploadId: string;
-    fileName: string;
-    fileSize: number;
-    fileType: string;
-    endpoint: string;
-    method?: string;
-    postData?: Record<string, any>;
-    metadata?: any[];
-    videoStartTime?: string;
-    videoEndTime?: string;
-    duration?: string;
-    uploadType: string;
-}
-interface InitializeUploadParams {
-    uploadId: string;
-    blobs: Blob[];
-    filenameArray: string[];
-    endpoint: string;
-    method?: string;
-    postData?: Record<string, any>;
-    metadata?: any[];
-    modificationConfigs?: ModificationConfig[];
-    videoStartTime?: string;
-    videoEndTime?: string;
-    duration?: string;
-    uploadType: string;
-    transformer?: {
-        quality?: number | 'high' | 'medium' | 'low';
-        auto?: boolean;
-        format?: string;
-    };
-}
 interface UploadProgressState {
     uploads: UploadProgress[];
     activeWorkers: Map<string, Worker>;
@@ -322,15 +165,14 @@ interface UploadProgressState {
     updateProgress: (uploadId: string, params: UpdateProgressParams) => void;
     updateUploadProgress: (message: WorkerMessage) => void;
     finalizeUpload: (uploadId: string, success: boolean, data?: any, error?: string) => void;
-    handleModificationRequest: (message: WorkerMessage) => void;
     pauseUpload: (uploadId: string) => void;
     resumeUpload: (uploadId: string) => void;
     cancelUpload: (uploadId: string) => void;
     retryUpload: (uploadId: string) => void;
     removeUpload: (uploadId: string) => void;
-    clearCompleted: () => void;
-    clearFailed: () => void;
-    clearAll: () => void;
+    clearCompleted: () => Promise<void>;
+    clearFailed: () => Promise<void>;
+    clearAll: () => Promise<void>;
     checkForResumableUploads: () => Promise<void>;
     handleResumeResponse: (message: WorkerMessage) => void;
     createWorker: (uploadId: string) => Worker;
@@ -338,10 +180,6 @@ interface UploadProgressState {
     terminateAllWorkers: () => void;
     processUploadQueue: () => void;
     enqueueUpload: (params: InitializeUploadParams) => void;
-    modifyFile: (uploadId: string, fileIndex: number, blob: Blob, config: any) => Promise<Blob>;
-    generateThumbnail: (uploadId: string, fileIndex: number, blob: Blob) => Promise<string>;
-    handleThumbnailRequest: (message: WorkerMessage) => Promise<void>;
-    handleTransformationRequest: (message: WorkerMessage) => Promise<void>;
     getUpload: (uploadId: string) => UploadProgress | undefined;
     totalProgress: number;
     activeUploads: number;
@@ -351,6 +189,28 @@ interface UploadProgressState {
     hasUploads: boolean;
     hasActiveUploads: boolean;
     canResumeAnyUpload: boolean;
+}
+interface AddUploadParams {
+    uploadId: string;
+    fileName: string;
+    fileSize: number;
+    fileType: string;
+    endpoint: string;
+    method?: string;
+    postData?: Record<string, any>;
+    metadata?: any[];
+    uploadType: string;
+}
+interface InitializeUploadParams {
+    uploadId: string;
+    blobs: Blob[];
+    filenameArray: string[];
+    endpoint: string;
+    method?: string;
+    postData?: Record<string, any>;
+    metadata?: any[];
+    uploadType: string;
+    transformer?: any;
 }
 declare const useUploadProgress: Omit<Omit<zustand_vanilla.StoreApi<UploadProgressState>, "persist"> & {
     persist: {
@@ -374,9 +234,9 @@ declare const useUploadActions: () => {
     cancelUpload: (uploadId: string) => void;
     retryUpload: (uploadId: string) => void;
     removeUpload: (uploadId: string) => void;
-    clearCompleted: () => void;
-    clearFailed: () => void;
-    clearAll: () => void;
+    clearCompleted: () => Promise<void>;
+    clearFailed: () => Promise<void>;
+    clearAll: () => Promise<void>;
     checkForResumableUploads: () => Promise<void>;
     createWorker: (uploadId: string) => Worker;
 };
@@ -400,6 +260,14 @@ declare class UploadManager {
     private config;
     private eventListeners;
     constructor(config?: UploadManagerConfig);
+    /**
+     * Get default worker URL based on environment and format
+     */
+    private getDefaultWorkerUrl;
+    /**
+     * Fallback method to get worker URL without import.meta
+     */
+    private getWorkerUrlFallback;
     /**
      * Initialize and setup Web Worker
      */
@@ -477,9 +345,13 @@ declare class UploadManager {
      */
     private restoreFromStorage;
     /**
+     * Set worker URL dynamically (useful for consumers)
+     */
+    setWorkerUrl(url: string): void;
+    /**
      * Cleanup and destroy
      */
     destroy(): void;
 }
 
-export { type AddUploadParams, type AudioEventCallbacks, type AudioTrimOptions, type EventCallbacks, type FileUploadItem, type InitializeUploadParams, type ModificationConfig, type TrimOptions, type UpdateProgressParams, UploadManager, type UploadManagerConfig, type UploadMediaConfig, type UploadOptions, type UploadProgress, type UploadProgressState, type UploadResult, type UploadStatus, type VideoMetadata, VideoTrimmer, type WorkerMessage, cleanupUploadResources, getUploadMediaConfig, setUploadMediaConfig, useUploadActions, useUploadProgress, useVideoTrimmer };
+export { type AddUploadParams, type FileMetadata, type FileUploadItem, type InitializeUploadParams, type Quality, type QualityConfig, type TransformerConfig, type UpdateProgressParams, UploadManager, type UploadManagerConfig, type UploadMediaConfig, type UploadOptions, type UploadProgress, type UploadProgressState, type UploadResult, type UploadStatus, type WorkerMessage, cleanupUploadResources, getUploadMediaConfig, setUploadMediaConfig, useUploadActions, useUploadProgress };

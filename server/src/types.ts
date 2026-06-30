@@ -5,14 +5,197 @@
 import { Readable } from 'stream';
 
 export type MediaKind = 'image' | 'video' | 'audio' | 'document' | 'unknown';
-export type Quality = 'high' | 'medium' | 'low';
+// ── Types ─────────────────────────────────────────────────────────────────────
+export type ResolutionLabel =
+  | '2160p' | '4k'
+  | '1440p' | '2k'
+  | '1080p'
+  | '720p'
+  | '540p'
+  | '480p'
+  | '360p'
+  | '240p'
+  | '144p';
 
+export type Quality = 'high' | 'medium' | 'low' | number;
+
+export interface QualityConfig {
+  id: string;
+  label: string;
+  quality?: Quality;
+  resolution?: string;   // e.g. '1080p', '720p', '480p'
+  videoBitrate?: string; // e.g. '4000k', '2500k'
+  audioBitrate?: string; // e.g. '192k', '128k'
+  width?: number;
+  height?: number;
+  codec?: string;
+  maxDimension?: number;
+  format?: string;
+  crf?: number;
+}
+export interface VideoQualityConfig extends QualityConfig {
+  resolution?: ResolutionLabel | string;
+  crf?: number;
+  videoBitrate?: string;
+  audioBitrate?: string;
+  codec?: string;
+  preset?: ResolvedQuality['preset'];
+  format?: string;
+}
+export interface ImageProcessingConfig {
+  quality?: Quality;
+  qualityConfig?: QualityConfig;
+  qualityConfigs?: QualityConfig[];
+  format?: string;
+  width?: number;
+  height?: number;
+}
+
+export interface VideoProcessingConfig {
+  quality?: Quality;
+  qualityConfig?: QualityConfig;
+  qualityConfigs?: QualityConfig[];
+  format?: string;
+  startTime?: number;
+  endTime?: number;
+  mute?: boolean;
+  videoBitrate?: string;
+  audioBitrate?: string;
+  resolution?: string;
+  codec?: string;
+  generateThumbnail?: boolean;
+  thumbnailTimeSeconds?: number;
+}
+
+export interface AudioProcessingConfig {
+  quality?: Quality;
+  qualityConfig?: QualityConfig;
+  qualityConfigs?: QualityConfig[];
+  format?: string;
+  startTime?: number;
+  endTime?: number;
+  audioBitrate?: string;
+}
+
+export interface ProcessingResult {
+  /** Primary output buffer (single quality) */
+  buffer?: Buffer;
+  /** Multi-quality outputs keyed by QualityConfig.id */
+  variants?: Record<string, Buffer>;
+  /** Thumbnail as buffer (JPEG) */
+  thumbnail?: Buffer;
+  /** MIME type of the primary output */
+  mimeType: string;
+  /** File extension without dot */
+  extension: string;
+}
+
+export interface MediaProcessorOptions {
+  /** Directory for temporary files. Defaults to os.tmpdir() */
+  tempDir?: string;
+  /** Path to ffmpeg binary. If not set, uses system PATH */
+  ffmpegPath?: string;
+  /** Path to ffprobe binary */
+  ffprobePath?: string;
+  /** Max concurrent ffmpeg processes (default: 2) */
+  maxConcurrency?: number;
+  /** Timeout per processing job in ms (default: 10 minutes) */
+  timeoutMs?: number;
+}
+
+// ── Quality resolution helpers ────────────────────────────────────────────────
+
+export interface ResolvedQuality {
+  width?: number;
+  height?: number;
+  videoBitrate?: string;
+  audioBitrate?: string;
+  crf?: number;
+  /** FFmpeg -preset value derived from the encoding ladder. */
+  preset?: 'ultrafast' | 'superfast' | 'veryfast' | 'faster' | 'fast' | 'medium' | 'slow' | 'slower' | 'veryslow';
+}
 export interface SizeLimitMap {
   image?: number;
   video?: number;
   audio?: number;
   document?: number;
   default?: number;
+}
+// ── Result type ───────────────────────────────────────────────────────────────
+
+export interface UploadResult {
+  status: 'success' | 'chunk_received' | 'error';
+  message: string;
+  fileId?: string;
+  url?: string;
+  storageRef?: string;
+  chunkIndex?: number;
+  totalChunks?: number;
+  progress?: number;
+  metadata?: Record<string, any>;
+  fields?: Record<string, any>;
+  file?: FileRecord;
+  files?: FileRecord[];
+  fileFields?: Record<string, FileRecord | FileRecord[]>;
+  parentFile?: FileRecord;
+  variants?: Record<string, { url?: string; storageRef: string; fileId: string }>;
+  thumbnailUrl?: string;
+  error?: any;
+}
+
+// ── Transformer config (as sent from frontend) ────────────────────────────────
+
+export interface FrontendTransformerConfig {
+  // ── Media type (inferred from mimetype if omitted) ──────────────────────
+  type?: 'image' | 'video' | 'audio';
+
+  // ── Quality — three accepted shapes (see above) ─────────────────────────
+
+  /** Single named or numeric quality level. */
+  quality?: 'high' | 'medium' | 'low' | number | string;
+
+  /**
+   * Resolution labels for multi-quality encode.
+   * Each string must be a known resolution: '2160p' | '1440p' | '1080p' |
+   * '720p' | '540p' | '480p' | '360p' | '240p'
+   * The encoding ladder automatically assigns crf, bitrate, and preset.
+   */
+  qualities?: ResolutionLabel[];
+
+  /**
+   * Fully explicit per-variant configs.
+   * Can be an array or a Record keyed by variant id.
+   * Takes precedence over `qualities`.
+   */
+  qualityConfigs?: QualityConfig[] | Record<string, QualityConfig>;
+
+  // ── Format ───────────────────────────────────────────────────────────────
+  /**
+   * Output container format.
+   * Accepts both plain ('mp4') and MIME-prefixed ('video/mp4') — server strips prefix.
+   * Video defaults: 'mp4'. Audio defaults: 'mp3'. Image defaults: source format.
+   */
+  format?: string;
+
+  // ── Video-specific ────────────────────────────────────────────────────────
+  startTime?: number;   // Trim start in seconds
+  endTime?: number;   // Trim end in seconds
+  mute?: boolean;  // Strip audio track
+  videoBitrate?: string;   // e.g. '2500k' — overrides ladder default
+  audioBitrate?: string;   // e.g. '128k'  — overrides ladder default
+  resolution?: ResolutionLabel | string; // Single-quality resolution override
+  codec?: string;   // Video codec, default 'libx264'
+  generateThumbnail?: boolean;  // Default true for video
+  thumbnailTimeSeconds?: number;   // Seek time for thumbnail (default: 10% of duration)
+
+  // ── Image-specific ────────────────────────────────────────────────────────
+  width?: number;
+  height?: number;
+
+  // ── Misc / passthrough ────────────────────────────────────────────────────
+  /** Unused by the server; safe to include arbitrary frontend metadata. */
+  auto?: boolean;
+  [key: string]: any;
 }
 
 export interface UploadTypeConfig {
@@ -107,11 +290,15 @@ export interface StorageContext {
 
 export interface StorageAdapter {
   readonly name: string;
+  readonly hasNativeVariantSupport?: boolean;
   writeChunk(fileId: string, chunkNumber: number, data: Buffer, ctx: StorageContext): Promise<void>;
   finalize(fileId: string, ctx: StorageContext): Promise<StorageWriteResult>;
   readStream(ref: string, options?: StorageReadOptions): Promise<Readable>;
   delete(ref: string): Promise<void>;
   putObject?(fileId: string, data: Buffer, ctx: StorageContext): Promise<StorageWriteResult>;
+  putStream?(fileId: string, stream: Readable, ctx: StorageContext): Promise<StorageWriteResult>;
+  assembleChunksToPath?(fileId: string, totalChunks: number, ext: string, ctx: StorageContext): Promise<string>;
+  readChunk?(fileId: string, chunkNumber: number, ctx: StorageContext): Promise<Buffer>;
 }
 
 export interface CacheAdapter {
@@ -134,7 +321,7 @@ export interface NormalizedRequest {
   fields?: Record<string, any>;
   files?: any[];
   fileFields?: Record<string, any>;
-  transformer?: any;
+  transformer?: FrontendTransformerConfig;
 }
 
 export interface NormalizedResponse {
@@ -162,6 +349,10 @@ export interface ThumbnailGenerator {
   generate(file: FileRecord, source: Readable | Buffer): Promise<Buffer | null>;
 }
 
+/**
+ * @upload-media/server - Add to existing types.ts
+ */
+
 export interface UploadEngineConfig {
   storages: Record<string, StorageAdapter>;
   defaultStorage: string;
@@ -172,17 +363,24 @@ export interface UploadEngineConfig {
   uploadTypes: Record<string, UploadTypeConfig>;
   globalLimits?: SizeLimitMap;
   globalChunkLimits?: SizeLimitMap;
-  thumbnailGenerator?: ThumbnailGenerator;
   onUploadComplete?: (file: FileRecord) => void | Promise<void>;
   onError?: (error: Error, context: { uploadType?: string; sessionId?: string }) => void;
   staleUploadRetentionMs?: number;
-
-  // Missing properties that were in use but not in interface
   maxFieldSize?: number;
   maxFiles?: number;
   maxTotalSize?: number;
   onProgress?: (progress: any) => void;
   autoRespond?: boolean;
+  // NEW: MediaProcessor configuration
+  mediaProcessor?: MediaProcessorOptions;
+}
+
+export interface MediaProcessorOptions {
+  tempDir?: string;
+  ffmpegPath?: string;
+  ffprobePath?: string;
+  maxConcurrency?: number;
+  timeoutMs?: number;
 }
 
 export interface ResolvedUploadEngineConfig extends Required<Pick<UploadEngineConfig, 'storages' | 'defaultStorage' | 'database' | 'uploadTypes'>> {

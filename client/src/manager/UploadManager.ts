@@ -23,7 +23,7 @@ export class UploadManager {
 
   constructor(config: UploadManagerConfig = {}) {
     this.config = {
-      workerUrl: config.workerUrl || new URL('./upload.worker.ts', import.meta.url).href,
+      workerUrl: config.workerUrl || this.getDefaultWorkerUrl(),
       onProgress: config.onProgress || (() => { }),
       onComplete: config.onComplete || (() => { }),
       onError: config.onError || ((err) => console.error(err)),
@@ -35,22 +35,99 @@ export class UploadManager {
   }
 
   /**
+   * Get default worker URL based on environment and format
+   */
+  private getDefaultWorkerUrl(): string {
+    // Check if we're in a browser environment
+    if (typeof window === 'undefined') {
+      return '';
+    }
+
+    try {
+      // For ESM modules with import.meta.url support
+      if (typeof import.meta !== 'undefined' && import.meta.url) {
+        // Try to use the built worker file
+        try {
+          // This works in ESM
+          return new URL('../dist/worker/upload.worker.mjs', import.meta.url).href;
+        } catch (e) {
+          // Fallback for development
+          try {
+            return new URL('../worker/upload.worker.ts', import.meta.url).href;
+          } catch (fallbackError) {
+            // If import.meta.url fails, use the global approach
+            return this.getWorkerUrlFallback();
+          }
+        }
+      } else {
+        // For CJS or environments without import.meta.url support
+        return this.getWorkerUrlFallback();
+      }
+    } catch (error) {
+      console.warn('Failed to get worker URL via import.meta, using fallback:', error);
+      return this.getWorkerUrlFallback();
+    }
+  }
+
+  /**
+   * Fallback method to get worker URL without import.meta
+   */
+  private getWorkerUrlFallback(): string {
+    // In browser, try to construct URL based on script location
+    if (typeof document !== 'undefined') {
+      const scripts = document.getElementsByTagName('script');
+      if (scripts.length > 0) {
+        // Try to find our script
+        for (const script of scripts) {
+          if (script.src && script.src.includes('upload-media')) {
+            const baseUrl = script.src.substring(0, script.src.lastIndexOf('/') + 1);
+            return `${baseUrl}worker/upload.worker.mjs`;
+          }
+        }
+      }
+    }
+
+    // Last resort - relative URL that works in some cases
+    return '/worker/upload.worker.mjs';
+  }
+
+  /**
    * Initialize and setup Web Worker
    */
   private initializeWorker(): void {
     try {
-      this.worker = new Worker(this.config.workerUrl, { type: 'module' });
+      const workerUrl = this.config.workerUrl;
+
+      if (!workerUrl) {
+        console.warn('[Worker] No worker URL provided, skipping worker initialization');
+        return;
+      }
+
+      try {
+        // Try with module type first (for ESM)
+        this.worker = new Worker(workerUrl, { type: 'module' });
+      } catch (error) {
+        console.warn('[Worker] Module worker failed, trying classic worker:', error);
+        // Fallback to classic worker
+        try {
+          this.worker = new Worker(workerUrl);
+        } catch (fallbackError) {
+          console.error('[Worker] Classic worker also failed:', fallbackError);
+          throw fallbackError;
+        }
+      }
 
       this.worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
         this.handleWorkerMessage(event.data);
       };
 
       this.worker.onerror = (error: ErrorEvent) => {
-        console.log(error)
+        console.error('[Worker Error]', error);
         this.config.onError?.(new Error(`Worker error: ${error.message}`));
       };
+
     } catch (error) {
-      console.error('Failed to initialize worker:', error);
+      console.error('[Worker] Failed to initialize worker:', error);
       this.config.onError?.(new Error('Worker initialization failed'));
     }
   }
@@ -105,7 +182,6 @@ export class UploadManager {
   private async handleTransformationRequest(message: WorkerMessage): Promise<void> {
     // This is just a stub for now, real implementation should be in useUploadProgress or similar
     // for consistency with handleModificationRequest.
-
   }
 
   /**
@@ -137,6 +213,8 @@ export class UploadManager {
       fieldnames.forEach((name, i) => {
         if (!enhancedMetadata[i]) enhancedMetadata[i] = {};
         enhancedMetadata[i].fieldname = name;
+        enhancedMetadata[i].size = files[i].size;
+        enhancedMetadata[i].type = files[i].type;
       });
 
       // Initialize upload progress
@@ -175,6 +253,9 @@ export class UploadManager {
           ...options,
           metadata: enhancedMetadata,
         });
+      } else {
+        console.warn('[Upload] Worker not available, upload will not proceed');
+        throw new Error('Worker not initialized');
       }
 
       return {
@@ -420,6 +501,18 @@ export class UploadManager {
     } catch (error) {
       console.warn('Failed to restore from storage:', error);
     }
+  }
+
+  /**
+   * Set worker URL dynamically (useful for consumers)
+   */
+  setWorkerUrl(url: string): void {
+    this.config.workerUrl = url;
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+    }
+    this.initializeWorker();
   }
 
   /**

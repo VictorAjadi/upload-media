@@ -78,6 +78,10 @@ function getMimeKind(contentType) {
   return "unknown";
 }
 
+// src/core/UploadEngine.ts
+import * as fs2 from "fs";
+import * as path2 from "path";
+
 // src/config/UploadConfig.ts
 var ConfigValidationError = class extends Error {
   constructor(message) {
@@ -229,7 +233,8 @@ var MultipartParser = class {
         fileStream.on("data", (chunk) => {
           size += chunk.length;
           totalSize += chunk.length;
-          chunks.push(chunk);
+          const safeChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          chunks.push(safeChunk);
           options.onProgress?.(totalSize, options.maxTotalSize ?? Infinity);
         });
         fileStream.on("limit", () => {
@@ -243,12 +248,15 @@ var MultipartParser = class {
             }
             fileInfo.size = size;
             const buffer = Buffer.concat(chunks, size);
-            if (options.fileValidation?.[fieldname]?.detectMagicBytes) {
+            const fileRule = options.fileValidation?.[fieldname];
+            const wildcardRule = options.fileValidation?.[".*"];
+            if (fileRule?.detectMagicBytes || wildcardRule?.detectMagicBytes) {
               fileInfo.detectedMimetype = this.detectMimeType(buffer);
             }
-            const rule = options.fileValidation?.[fieldname];
-            if (rule) {
-              this.validateFile(fieldname, fileInfo, buffer, rule);
+            if (fileRule) {
+              this.validateFile(fieldname, fileInfo, buffer, fileRule);
+            } else if (wildcardRule) {
+              this.validateFile(fieldname, fileInfo, buffer, wildcardRule);
             }
             if (options.hooks?.onFileParsed) {
               await options.hooks.onFileParsed(
@@ -398,20 +406,24 @@ var MultipartParser = class {
         `File "${fieldname}" exceeds the maximum size of ${rule.maxSize} bytes`
       );
     }
-    const mimeToCheck = info.detectedMimetype || info.mimetype;
-    if (rule.allowedMimeTypes && !rule.allowedMimeTypes.includes(mimeToCheck)) {
-      throw new Error(
-        `File "${fieldname}" has unsupported type "${mimeToCheck}". Allowed: ${rule.allowedMimeTypes.join(", ")}`
-      );
-    }
-    if (rule.allowedMimePatterns) {
-      const matches = rule.allowedMimePatterns.some((pattern) => {
-        const regex = new RegExp(`^${pattern.replace("*", ".*")}$`);
-        return regex.test(mimeToCheck);
-      });
-      if (!matches) {
+    const detectedIsUnknown = !info.detectedMimetype || info.detectedMimetype === "application/octet-stream";
+    const mimeToCheck = detectedIsUnknown ? info.mimetype : info.detectedMimetype;
+    if (rule.allowedMimeTypes && rule.allowedMimeTypes.length > 0) {
+      const detectedMatch = info.detectedMimetype && rule.allowedMimeTypes.includes(info.detectedMimetype);
+      const originalMatch = rule.allowedMimeTypes.includes(info.mimetype);
+      if (!detectedMatch && !originalMatch) {
         throw new Error(
-          `File "${fieldname}" type does not match allowed patterns: ${rule.allowedMimePatterns.join(", ")}`
+          `File "${fieldname}" has unsupported type "${mimeToCheck}". Allowed: ${rule.allowedMimeTypes.join(", ")}`
+        );
+      }
+    }
+    if (rule.allowedMimePatterns && rule.allowedMimePatterns.length > 0) {
+      const patterns = rule.allowedMimePatterns;
+      const detectedMatch = info.detectedMimetype && !detectedIsUnknown && this.matchesMimePattern(info.detectedMimetype, patterns);
+      const originalMatch = this.matchesMimePattern(info.mimetype, patterns);
+      if (!detectedMatch && !originalMatch) {
+        throw new Error(
+          `File "${fieldname}" type "${mimeToCheck}" does not match allowed patterns: ${patterns.join(", ")}`
         );
       }
     }
@@ -420,14 +432,33 @@ var MultipartParser = class {
     }
   }
   /**
+   * Helper method to check if a MIME type matches any of the given patterns
+   */
+  static matchesMimePattern(mimeType, patterns) {
+    return patterns.some((pattern) => {
+      const subPatterns = pattern.split("|");
+      return subPatterns.some((singlePattern) => {
+        const regexPattern = singlePattern.trim().replace(/\*/g, ".*").replace(/\?/g, ".");
+        const regex = new RegExp(`^${regexPattern}$`);
+        return regex.test(mimeType);
+      });
+    });
+  }
+  /**
    * Detect MIME type from magic bytes.
    * Returns detected MIME type or 'application/octet-stream' if unknown.
+   * 
+   * This method now handles both Buffer and Uint8Array inputs safely.
    */
   static detectMimeType(buffer) {
-    if (buffer.length < 4) return "application/octet-stream";
+    const safeBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    if (safeBuffer.length < 4) return "application/octet-stream";
     for (const [_, { signature, mimeType }] of Object.entries(MAGIC_BYTES)) {
-      if (buffer.subarray(0, signature.length).equals(signature)) {
-        return mimeType;
+      if (safeBuffer.length >= signature.length) {
+        const prefix = safeBuffer.subarray(0, signature.length);
+        if (prefix.equals(signature)) {
+          return mimeType;
+        }
       }
     }
     return "application/octet-stream";
@@ -492,83 +523,1267 @@ function parseBooleanFlag(value) {
   return value === true || value === "true" || value === "1" || value === 1;
 }
 
-// src/core/UploadEngine.ts
-var UploadEngine = class {
-  config;
-  constructor(config) {
-    this.config = resolveUploadConfig(config);
+// src/core/Mediaprocessor.ts
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+function ensureBuffer(input) {
+  if (Buffer.isBuffer(input)) return input;
+  if (input instanceof ArrayBuffer) return Buffer.from(input);
+  if (input instanceof Uint8Array) return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  return Buffer.from(input);
+}
+function normaliseFormat(format) {
+  return format.replace(/^(video|audio|image)\//, "");
+}
+function loadSharp() {
+  try {
+    return __require("sharp");
+  } catch {
+    return null;
+  }
+}
+function loadFluentFfmpeg() {
+  try {
+    return __require("fluent-ffmpeg");
+  } catch {
+    return null;
+  }
+}
+function resolveFfmpegPath(customPath) {
+  if (customPath) return customPath;
+  try {
+    const p = __require("@ffmpeg-installer/ffmpeg").path;
+    if (p) return p;
+  } catch {
+  }
+  try {
+    const p = __require("ffmpeg-static");
+    if (p) return p;
+  } catch {
+  }
+  try {
+    const cmd = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+    __require("child_process").execSync(`"${cmd}" -version`, { stdio: "ignore" });
+    return cmd;
+  } catch {
+  }
+  console.warn("[MediaProcessor] FFmpeg not found \u2014 video/audio processing disabled.");
+  return null;
+}
+function resolveFfprobePath(customPath, ffmpegPath) {
+  if (customPath) return customPath;
+  try {
+    const p = __require("@ffprobe-installer/ffprobe").path;
+    if (p) return p;
+  } catch {
+  }
+  if (ffmpegPath) {
+    const probe = path.join(
+      path.dirname(ffmpegPath),
+      process.platform === "win32" ? "ffprobe.exe" : "ffprobe"
+    );
+    try {
+      __require("child_process").execSync(`"${probe}" -version`, { stdio: "ignore" });
+      return probe;
+    } catch {
+    }
+  }
+  return process.platform === "win32" ? "ffprobe.exe" : "ffprobe";
+}
+var RESOLUTION_MAP = {
+  "2160p": { width: 3840, height: 2160 },
+  "4k": { width: 3840, height: 2160 },
+  "1440p": { width: 2560, height: 1440 },
+  "2k": { width: 2560, height: 1440 },
+  "1080p": { width: 1920, height: 1080 },
+  "720p": { width: 1280, height: 720 },
+  "540p": { width: 960, height: 540 },
+  "480p": { width: 854, height: 480 },
+  "360p": { width: 640, height: 360 },
+  "240p": { width: 426, height: 240 },
+  "144p": { width: 256, height: 144 }
+};
+function parseResolution(res) {
+  if (!res) return void 0;
+  return RESOLUTION_MAP[res.toLowerCase()];
+}
+var RESOLUTION_ENCODING_LADDER = {
+  "2160p": { crf: 17, videoBitrate: "14000k", maxBitrate: "21000k", bufsize: "28000k", audioBitrate: "192k", preset: "slow" },
+  "4k": { crf: 17, videoBitrate: "14000k", maxBitrate: "21000k", bufsize: "28000k", audioBitrate: "192k", preset: "slow" },
+  "1440p": { crf: 19, videoBitrate: "7500k", maxBitrate: "11250k", bufsize: "15000k", audioBitrate: "192k", preset: "medium" },
+  "2k": { crf: 19, videoBitrate: "7500k", maxBitrate: "11250k", bufsize: "15000k", audioBitrate: "192k", preset: "medium" },
+  "1080p": { crf: 20, videoBitrate: "4000k", maxBitrate: "6000k", bufsize: "8000k", audioBitrate: "160k", preset: "medium" },
+  "720p": { crf: 21, videoBitrate: "2200k", maxBitrate: "3300k", bufsize: "4400k", audioBitrate: "128k", preset: "fast" },
+  "540p": { crf: 23, videoBitrate: "1300k", maxBitrate: "1950k", bufsize: "2600k", audioBitrate: "128k", preset: "fast" },
+  "480p": { crf: 24, videoBitrate: "900k", maxBitrate: "1350k", bufsize: "1800k", audioBitrate: "96k", preset: "faster" },
+  "360p": { crf: 26, videoBitrate: "650k", maxBitrate: "975k", bufsize: "1300k", audioBitrate: "96k", preset: "faster" },
+  "240p": { crf: 28, videoBitrate: "400k", maxBitrate: "600k", bufsize: "800k", audioBitrate: "64k", preset: "veryfast" },
+  "144p": { crf: 30, videoBitrate: "200k", maxBitrate: "300k", bufsize: "400k", audioBitrate: "64k", preset: "veryfast" }
+};
+var X264_PRESET_ORDER = [
+  "veryslow",
+  "slower",
+  "slow",
+  "medium",
+  "fast",
+  "faster",
+  "veryfast",
+  "superfast",
+  "ultrafast"
+];
+function resolveRuntimePreset(basePreset, cpuCount, concurrentVariants, speedProfile) {
+  const baseIndex = X264_PRESET_ORDER.indexOf(basePreset);
+  const safeBaseIndex = baseIndex === -1 ? X264_PRESET_ORDER.indexOf("medium") : baseIndex;
+  const threadsPerProcess = Math.max(1, Math.floor(cpuCount / Math.max(1, concurrentVariants)));
+  let step = 0;
+  if (threadsPerProcess <= 1) step += 1;
+  if (speedProfile === "speed") step += 2;
+  else if (speedProfile === "quality") step -= 1;
+  const targetIndex = Math.min(
+    X264_PRESET_ORDER.length - 1,
+    Math.max(0, safeBaseIndex + step)
+  );
+  return X264_PRESET_ORDER[targetIndex];
+}
+function getLadderTier(resolution) {
+  if (!resolution) return null;
+  return RESOLUTION_ENCODING_LADDER[resolution.toLowerCase()] ?? null;
+}
+function resolveVideoQuality(cfg, quality) {
+  if (cfg) {
+    const dims = parseResolution(cfg.resolution);
+    const ladder = getLadderTier(cfg.resolution);
+    return {
+      width: cfg.width ?? dims?.width,
+      height: cfg.height ?? dims?.height,
+      videoBitrate: cfg.videoBitrate ?? ladder?.videoBitrate ?? resolveNamedVideoBitrate(quality),
+      audioBitrate: cfg.audioBitrate ?? ladder?.audioBitrate ?? resolveNamedAudioBitrate(quality),
+      crf: cfg.crf ?? ladder?.crf ?? resolveCrf(quality),
+      preset: cfg.preset ?? ladder?.preset ?? resolveNamedPreset(quality)
+    };
+  }
+  return {
+    videoBitrate: resolveNamedVideoBitrate(quality),
+    audioBitrate: resolveNamedAudioBitrate(quality),
+    crf: resolveCrf(quality),
+    preset: resolveNamedPreset(quality)
+  };
+}
+function resolveNamedVideoBitrate(quality) {
+  if (typeof quality === "number") return `${quality}k`;
+  switch (quality) {
+    case "high":
+      return "4500k";
+    case "low":
+      return "800k";
+    default:
+      return "2500k";
+  }
+}
+function resolveNamedAudioBitrate(quality) {
+  switch (quality) {
+    case "high":
+      return "192k";
+    case "low":
+      return "96k";
+    default:
+      return "128k";
+  }
+}
+function resolveNamedPreset(quality) {
+  switch (quality) {
+    case "high":
+      return "medium";
+    case "low":
+      return "veryfast";
+    default:
+      return "faster";
+  }
+}
+function resolveCrf(quality) {
+  if (typeof quality === "number") {
+    return Math.round(51 - Math.min(100, Math.max(0, quality)) / 100 * 51);
+  }
+  switch (quality) {
+    case "high":
+      return 18;
+    case "low":
+      return 28;
+    default:
+      return 23;
+  }
+}
+var TIER_SOURCE_BITRATE_FACTOR = {
+  "2160p": 0.85,
+  "4k": 0.85,
+  "1440p": 0.75,
+  "2k": 0.75,
+  "1080p": 0.65,
+  "720p": 0.55,
+  "540p": 0.5,
+  "480p": 0.45,
+  "360p": 0.4,
+  "240p": 0.35,
+  "144p": 0.3
+};
+var DEFAULT_TIER_SOURCE_FACTOR = 0.55;
+var MIN_VIDEO_BITRATE_KBPS = 80;
+function kbpsToString(kbps) {
+  return `${Math.max(MIN_VIDEO_BITRATE_KBPS, Math.round(kbps))}k`;
+}
+function parseKbps(bitrateStr) {
+  if (!bitrateStr) return null;
+  const n = parseInt(bitrateStr, 10);
+  return isNaN(n) ? null : n;
+}
+function clampTierToSourceBitrate(resolution, ladderVideoBitrateKbps, sourceBitrateKbps) {
+  if (!sourceBitrateKbps || sourceBitrateKbps <= 0) return null;
+  const factor = (resolution && TIER_SOURCE_BITRATE_FACTOR[resolution.toLowerCase()]) ?? DEFAULT_TIER_SOURCE_FACTOR;
+  const sourceDerivedTarget = sourceBitrateKbps * (factor === "" ? 0 : factor);
+  if (sourceDerivedTarget >= ladderVideoBitrateKbps) return null;
+  const videoBitrateKbps = Math.max(MIN_VIDEO_BITRATE_KBPS, sourceDerivedTarget);
+  const maxBitrateKbps = videoBitrateKbps * 1.5;
+  const bufsizeKbps = videoBitrateKbps * 2;
+  return {
+    videoBitrate: kbpsToString(videoBitrateKbps),
+    maxBitrate: kbpsToString(maxBitrateKbps),
+    bufsize: kbpsToString(bufsizeKbps)
+  };
+}
+function resolveMaxBitrate(cfg, avgBitrate) {
+  if (cfg?.resolution) {
+    const tier = getLadderTier(cfg.resolution);
+    if (tier) return tier.maxBitrate;
+  }
+  const n = parseInt(avgBitrate, 10);
+  return isNaN(n) ? avgBitrate : `${Math.round(n * 1.5)}k`;
+}
+function resolveBufsize(cfg, avgBitrate) {
+  if (cfg?.resolution) {
+    const tier = getLadderTier(cfg.resolution);
+    if (tier) return tier.bufsize;
+  }
+  const n = parseInt(avgBitrate, 10);
+  return isNaN(n) ? avgBitrate : `${n * 2}k`;
+}
+function resolveImageQuality(cfg, quality) {
+  if (cfg?.quality !== void 0) return resolveImageQualityValue(cfg.quality);
+  return resolveImageQualityValue(quality);
+}
+function resolveImageQualityValue(quality) {
+  if (typeof quality === "number") return Math.max(1, Math.min(100, quality));
+  switch (quality) {
+    case "high":
+      return 90;
+    case "low":
+      return 60;
+    default:
+      return 80;
+  }
+}
+function resolveImageDimensions(cfg, quality) {
+  if (cfg) {
+    if (cfg.width || cfg.height) return { width: cfg.width, height: cfg.height };
+    if (cfg.maxDimension) return { width: cfg.maxDimension, height: cfg.maxDimension };
+    if (cfg.resolution) {
+      const dims = parseResolution(cfg.resolution);
+      if (dims) return { width: dims.width, height: dims.height };
+    }
+  }
+  switch (quality) {
+    case "high":
+      return { width: 1920, height: 1080 };
+    case "low":
+      return { width: 800, height: 600 };
+    default:
+      return { width: 1280, height: 720 };
+  }
+}
+function resolveAudioBitrate(cfg, quality) {
+  if (cfg?.audioBitrate) return cfg.audioBitrate;
+  if (typeof quality === "number") return `${Math.max(64, Math.min(320, quality * 3))}k`;
+  switch (quality) {
+    case "high":
+      return "320k";
+    case "low":
+      return "96k";
+    default:
+      return "192k";
+  }
+}
+var Semaphore = class {
+  queue = [];
+  count;
+  constructor(max) {
+    this.count = max;
+  }
+  acquire() {
+    if (this.count > 0) {
+      this.count--;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.queue.push(resolve));
+  }
+  release() {
+    if (this.queue.length > 0) this.queue.shift()();
+    else this.count++;
+  }
+};
+var TempFileManager = class {
+  files = /* @__PURE__ */ new Set();
+  dir;
+  sessionId;
+  constructor(dir) {
+    this.dir = dir;
+    this.sessionId = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    fs.mkdirSync(dir, { recursive: true });
   }
   /**
-   * Main upload handler.
-   * Auto-detects chunked vs non-chunked by looking at actual multipart fields.
+   * Create a temp path for a given logical variant id (e.g. "480p", "720p",
+   * "thumb", "1080p_thumb"). Calling this twice with the same id returns the
+   * SAME path (idempotent) rather than minting a new random name — that's
+   * what allows a variant's encode output and its thumbnail to be named
+   * predictably and reused instead of regenerated.
    */
+  create(ext, variantId = "tmp") {
+    const safeId = variantId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const name = `upload_proc_${this.sessionId}_${safeId}${ext}`;
+    const fullPath = path.join(this.dir, name);
+    this.files.add(fullPath);
+    return fullPath;
+  }
+  register(filePath) {
+    this.files.add(filePath);
+  }
+  async cleanup(retries = 3, delayMs = 500) {
+    await new Promise((r) => setTimeout(r, delayMs));
+    const remaining = /* @__PURE__ */ new Set();
+    for (const f of this.files) {
+      let deleted = false;
+      for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+          if (fs.existsSync(f)) await fs.promises.unlink(f);
+          deleted = true;
+          break;
+        } catch {
+          if (attempt < retries - 1)
+            await new Promise((r) => setTimeout(r, delayMs * (attempt + 1)));
+        }
+      }
+      if (!deleted) remaining.add(f);
+    }
+    this.files.clear();
+    if (remaining.size > 0)
+      console.warn("[MediaProcessor] Failed to clean up temp files:", [...remaining]);
+  }
+};
+async function assembleChunksToDisk(chunks, outputPath) {
+  return new Promise((resolve, reject) => {
+    const ws = fs.createWriteStream(outputPath);
+    ws.on("error", reject);
+    ws.on("finish", resolve);
+    let i = 0;
+    function writeNext() {
+      if (i >= chunks.length) {
+        ws.end();
+        return;
+      }
+      const chunk = chunks[i++];
+      const ok = ws.write(chunk);
+      if (ok) writeNext();
+      else ws.once("drain", writeNext);
+    }
+    writeNext();
+  });
+}
+function buildScaleFilter(width, height) {
+  if (!width && !height) return null;
+  if (width && height) {
+    return [
+      `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=fast_bilinear`,
+      `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
+      `scale=trunc(iw/2)*2:trunc(ih/2)*2`
+    ].join(",");
+  }
+  if (width) return `scale=${width}:-2:flags=fast_bilinear`;
+  if (height) return `scale=-2:${height}:flags=fast_bilinear`;
+  return null;
+}
+var HW_ENCODERS_PRIORITY = ["h264_nvenc", "h264_qsv", "h264_amf"];
+var _hwProbeCache = null;
+var _hwProbeInflight = null;
+function extraArgsFor(enc) {
+  if (enc === "h264_nvenc") {
+    return ["-rc:v vbr", "-cq 23", "-b_ref_mode middle"];
+  }
+  if (enc === "h264_qsv") {
+    return ["-global_quality 23", "-look_ahead 1"];
+  }
+  return ["-rc cqp", "-qp_i 23", "-qp_p 25"];
+}
+function extraArgsForAbr(enc) {
+  if (enc === "h264_nvenc") {
+    return ["-rc:v cbr"];
+  }
+  if (enc === "h264_qsv") {
+    return ["-look_ahead 0"];
+  }
+  return ["-rc cbr"];
+}
+function canActuallyEncode(ffmpegBin, encoder, extraArgs) {
+  try {
+    const { execSync } = __require("child_process");
+    const argsStr = extraArgs.join(" ");
+    execSync(
+      `"${ffmpegBin}" -hide_banner -loglevel error -f lavfi -i color=c=black:s=64x64:d=0.1 -frames:v 1 -c:v ${encoder} ${argsStr} -f null -`,
+      { stdio: "ignore", timeout: 5e3 }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function probeHardwareEncoder(ffmpegBin, _ffmpegModule) {
+  if (_hwProbeCache) return _hwProbeCache;
+  if (_hwProbeInflight) return _hwProbeInflight;
+  _hwProbeInflight = (async () => {
+    try {
+      const { execSync } = __require("child_process");
+      const out = execSync(`"${ffmpegBin}" -encoders -v quiet`, {
+        encoding: "utf8",
+        timeout: 1e4
+      });
+      for (const enc of HW_ENCODERS_PRIORITY) {
+        if (!out.includes(enc)) continue;
+        const extraArgs = extraArgsFor(enc);
+        const works = canActuallyEncode(ffmpegBin, enc, extraArgs);
+        if (!works) {
+          console.log(`[MediaProcessor] ${enc} is compiled in but not functional on this machine (driver/GPU unavailable) \u2014 skipping.`);
+          continue;
+        }
+        console.log(`[MediaProcessor] Hardware encoder detected and verified working: ${enc}`);
+        _hwProbeCache = { encoder: enc, extraArgs };
+        return _hwProbeCache;
+      }
+    } catch (e) {
+      console.warn("[MediaProcessor] HW encoder probe failed, using libx264:", e.message);
+    }
+    console.log("[MediaProcessor] No working hardware encoder found \u2014 using libx264.");
+    _hwProbeCache = { encoder: null, extraArgs: [] };
+    return _hwProbeCache;
+  })();
+  const result = await _hwProbeInflight;
+  _hwProbeInflight = null;
+  return result;
+}
+function buildAudioFilterChain(bitrateStr) {
+  const k = parseInt(bitrateStr, 10);
+  const fcut = k <= 64 ? 14e3 : k <= 128 ? 17e3 : 2e4;
+  return [
+    "aresample=48000",
+    "highpass=f=80:poles=2",
+    `lowpass=f=${fcut}:poles=2`
+  ].join(",");
+}
+function resolveVbrQuality(bitrateStr) {
+  const k = parseInt(bitrateStr, 10);
+  if (k >= 320) return 0;
+  if (k >= 256) return 1;
+  if (k >= 192) return 2;
+  if (k >= 160) return 3;
+  if (k >= 128) return 4;
+  if (k >= 96) return 5;
+  if (k >= 64) return 7;
+  return 9;
+}
+var MediaProcessor = class {
+  tempDir;
+  ffmpegPath;
+  ffprobePath;
+  semaphore;
+  timeoutMs;
+  speedProfile;
+  hwProbePromise = null;
+  _sharp = void 0;
+  _sharpLoaded = false;
+  _ffmpeg = void 0;
+  _ffmpegLoaded = false;
+  constructor(options = {}) {
+    this.tempDir = options.tempDir ?? path.join(os.tmpdir(), "upload-media-proc");
+    const cpus2 = os.cpus().length;
+    const maxConcurrency = options.maxConcurrency ?? Math.min(4, Math.max(1, cpus2));
+    this.ffmpegPath = resolveFfmpegPath(options.ffmpegPath);
+    this.ffprobePath = resolveFfprobePath(options.ffprobePath, this.ffmpegPath);
+    this.semaphore = new Semaphore(maxConcurrency);
+    this.timeoutMs = options.timeoutMs ?? 30 * 60 * 1e3;
+    this.speedProfile = options.speedProfile ?? "balanced";
+    fs.mkdirSync(this.tempDir, { recursive: true });
+    if (this.ffmpegPath) {
+      this.hwProbePromise = probeHardwareEncoder(this.ffmpegPath, null);
+    }
+  }
+  get sharp() {
+    if (!this._sharpLoaded) {
+      this._sharp = loadSharp();
+      this._sharpLoaded = true;
+    }
+    return this._sharp;
+  }
+  get ffmpeg() {
+    if (!this._ffmpegLoaded) {
+      this._ffmpeg = loadFluentFfmpeg();
+      this._ffmpegLoaded = true;
+      if (this._ffmpeg && this.ffmpegPath) this._ffmpeg.setFfmpegPath(this.ffmpegPath);
+      if (this._ffmpeg && this.ffprobePath) this._ffmpeg.setFfprobePath(this.ffprobePath);
+    }
+    return this._ffmpeg;
+  }
+  get canProcessImages() {
+    return this.sharp !== null;
+  }
+  get canProcessMedia() {
+    return this.ffmpeg !== null && this.ffmpegPath !== null;
+  }
+  // ── Image processing ──────────────────────────────────────────────────────
+  async processImage(inputBuffer, originalMimeType, config) {
+    const safeBuffer = ensureBuffer(inputBuffer);
+    if (!this.canProcessImages) {
+      console.warn("[MediaProcessor] Sharp not installed \u2014 returning original image.");
+      return { buffer: safeBuffer, mimeType: originalMimeType, extension: inferImageFormat(originalMimeType) };
+    }
+    const qualityConfigs = config.qualityConfigs;
+    if (qualityConfigs && qualityConfigs.length > 1) {
+      const results = await Promise.all(
+        qualityConfigs.map(async (qc) => ({
+          id: qc.id,
+          buffer: await this.processImageSingle(this.sharp, safeBuffer, originalMimeType, {
+            ...config,
+            qualityConfig: qc,
+            quality: qc.quality ?? config.quality,
+            format: qc.format ?? config.format
+          })
+        }))
+      );
+      const variants = {};
+      for (const r of results) variants[r.id] = r.buffer;
+      const firstId = qualityConfigs[0].id;
+      return {
+        variants,
+        buffer: variants[firstId],
+        mimeType: resolveImageOutputMime(config.format ?? qualityConfigs[0].format, originalMimeType),
+        extension: resolveImageOutputExt(config.format ?? qualityConfigs[0].format, originalMimeType)
+      };
+    }
+    const buffer = await this.processImageSingle(this.sharp, safeBuffer, originalMimeType, config);
+    return {
+      buffer,
+      mimeType: resolveImageOutputMime(config.format, originalMimeType),
+      extension: resolveImageOutputExt(config.format, originalMimeType)
+    };
+  }
+  async processImageSingle(sharp, inputBuffer, originalMimeType, config) {
+    if (originalMimeType === "image/gif") return inputBuffer;
+    const dims = resolveImageDimensions(config.qualityConfig, config.quality);
+    const quality = resolveImageQuality(config.qualityConfig, config.quality);
+    const outputFormat = config.qualityConfig?.format ?? config.format ?? inferImageFormat(originalMimeType);
+    let pipeline = sharp(inputBuffer);
+    if (dims.width || dims.height) {
+      pipeline = pipeline.resize(dims.width ?? null, dims.height ?? null, { fit: "inside", withoutEnlargement: true });
+    }
+    switch (outputFormat) {
+      case "jpeg":
+      case "jpg":
+        pipeline = pipeline.jpeg({ quality, progressive: true, mozjpeg: true });
+        break;
+      case "webp":
+        pipeline = pipeline.webp({ quality, effort: 4 });
+        break;
+      case "png":
+        pipeline = pipeline.png({ compressionLevel: Math.round((100 - quality) / 10) });
+        break;
+      case "avif":
+        pipeline = pipeline.avif({ quality, effort: 4 });
+        break;
+      default:
+        pipeline = pipeline.jpeg({ quality, progressive: true });
+        break;
+    }
+    return await pipeline.toBuffer();
+  }
+  // ── Video processing ──────────────────────────────────────────────────────
+  async processVideo(inputBuffer, originalMimeType, originalFilename, config) {
+    const safeBuffer = ensureBuffer(inputBuffer);
+    if (!this.canProcessMedia) {
+      console.warn("[MediaProcessor] FFmpeg not available \u2014 returning original video.");
+      return { buffer: safeBuffer, mimeType: originalMimeType, extension: path.extname(originalFilename).slice(1) || "mp4" };
+    }
+    await this.semaphore.acquire();
+    const tmp = new TempFileManager(this.tempDir);
+    try {
+      const inputExt = path.extname(originalFilename) || inferVideoExt(originalMimeType);
+      const inputPath = tmp.create(inputExt, "source");
+      await fs.promises.writeFile(inputPath, safeBuffer);
+      return await this._encodeVideoFromPath(inputPath, originalMimeType, originalFilename, config, tmp);
+    } finally {
+      await tmp.cleanup();
+      this.semaphore.release();
+    }
+  }
+  async processVideoFromPath(inputPath, originalMimeType, originalFilename, config) {
+    if (!this.canProcessMedia) {
+      console.warn("[MediaProcessor] FFmpeg not available \u2014 returning passthrough.");
+      return {
+        outputPath: inputPath,
+        mimeType: originalMimeType,
+        extension: path.extname(originalFilename).slice(1) || "mp4",
+        cleanupFn: async () => {
+        }
+      };
+    }
+    await this.semaphore.acquire();
+    const tmp = new TempFileManager(this.tempDir);
+    let acquired = true;
+    try {
+      const result = await this._encodeVideoFromPath(
+        inputPath,
+        originalMimeType,
+        originalFilename,
+        config,
+        tmp
+      );
+      const releaseOnce = () => {
+        if (acquired) {
+          acquired = false;
+          this.semaphore.release();
+        }
+      };
+      return {
+        ...result,
+        cleanupFn: async () => {
+          try {
+            await tmp.cleanup();
+          } finally {
+            releaseOnce();
+          }
+        }
+      };
+    } catch (err) {
+      acquired = false;
+      this.semaphore.release();
+      await tmp.cleanup().catch(() => {
+      });
+      throw err;
+    }
+  }
+  /**
+   * Probe the source file's own bitrate via ffprobe. Used to clamp ladder
+   * targets down when the source is already lean (see clampTierToSourceBitrate).
+   * Returns null (and we just fall back to ladder defaults) if probing fails
+   * for any reason — this is a best-effort optimization, not load-bearing.
+   */
+  async probeSourceBitrateKbps(inputPath) {
+    if (!this.ffmpeg) return null;
+    try {
+      const metadata = await new Promise((resolve, reject) => {
+        this.ffmpeg.ffprobe(inputPath, (err, data) => {
+          if (err) reject(err);
+          else resolve(data);
+        });
+      });
+      const videoStream = metadata?.streams?.find((s) => s.codec_type === "video");
+      const raw = videoStream?.bit_rate ?? metadata?.format?.bit_rate;
+      const bps = raw != null ? parseInt(raw, 10) : NaN;
+      if (isNaN(bps) || bps <= 0) return null;
+      return bps / 1e3;
+    } catch {
+      return null;
+    }
+  }
+  async _encodeVideoFromPath(inputPath, originalMimeType, originalFilename, config, tmp) {
+    const outputFormat = normaliseFormat(config.format ?? "mp4");
+    const outputMime = `video/${outputFormat}`;
+    const sourceBitrateKbps = await this.probeSourceBitrateKbps(inputPath);
+    if (sourceBitrateKbps != null) {
+      console.log(`[MediaProcessor] Source bitrate: ${Math.round(sourceBitrateKbps)} kbps`);
+    }
+    if (config.qualityConfigs && config.qualityConfigs.length > 1) {
+      const variantSpecs = config.qualityConfigs.map((qc) => ({
+        qc,
+        outputPath: tmp.create(`.${outputFormat}`, qc.id)
+      }));
+      const cpuCount = os.cpus().length || 2;
+      const threadsPerProcess = Math.max(1, Math.floor(cpuCount / variantSpecs.length));
+      for (const { qc, outputPath: outputPath2 } of variantSpecs) {
+        const q = resolveVideoQuality(qc, config.quality);
+        console.log(
+          `[MediaProcessor] Queuing variant ${qc.id} (res: ${qc.resolution ?? "inherit"}, crf: ${q.crf}, b:v: ${q.videoBitrate}, preset: ${q.preset}, threads: ${threadsPerProcess})...`
+        );
+      }
+      const thumbnailPromise2 = config.generateThumbnail !== false ? this.generateVideoThumbnailBuffer(inputPath, config.thumbnailTimeSeconds, tmp, "thumb") : Promise.resolve(void 0);
+      await Promise.all(
+        variantSpecs.map(
+          ({ qc, outputPath: outputPath2 }) => this.runFFmpegVideo(
+            inputPath,
+            outputPath2,
+            outputFormat,
+            config,
+            qc,
+            threadsPerProcess,
+            variantSpecs.length,
+            sourceBitrateKbps
+          ).then(() => {
+            const sizeKB = (fs.statSync(outputPath2).size / 1024).toFixed(0);
+            console.log(`[MediaProcessor] Variant ${qc.id} done \u2014 ${sizeKB} KB`);
+          })
+        )
+      );
+      const thumbnail2 = await thumbnailPromise2;
+      const variantPaths = {};
+      for (const { qc, outputPath: outputPath2 } of variantSpecs) {
+        variantPaths[qc.id] = outputPath2;
+      }
+      const firstId = config.qualityConfigs[0].id;
+      return {
+        variants: {},
+        variantPaths,
+        buffer: void 0,
+        outputPath: variantPaths[firstId],
+        thumbnail: thumbnail2,
+        mimeType: outputMime,
+        extension: outputFormat
+      };
+    }
+    const outputPath = tmp.create(`.${outputFormat}`, "single");
+    const thumbnailPromise = config.generateThumbnail !== false ? this.generateVideoThumbnailBuffer(inputPath, config.thumbnailTimeSeconds, tmp, "thumb") : Promise.resolve(void 0);
+    await this.runFFmpegVideo(inputPath, outputPath, outputFormat, config, void 0, void 0, 1, sourceBitrateKbps);
+    const buffer = await fs.promises.readFile(outputPath);
+    const thumbnail = await thumbnailPromise;
+    return { buffer, outputPath, thumbnail, mimeType: outputMime, extension: outputFormat };
+  }
+  async runFFmpegVideo(inputPath, outputPath, format, config, qc, threadsPerProcess, concurrentVariants = 1, sourceBitrateKbps = null) {
+    let hwProbe = { encoder: null, extraArgs: [] };
+    if (this.hwProbePromise) {
+      try {
+        hwProbe = await this.hwProbePromise;
+      } catch {
+      }
+    }
+    const requestedCodec = qc?.codec ?? config.codec ?? "libx264";
+    if (hwProbe.encoder && requestedCodec === "libx264") {
+      try {
+        await this._executeFfmpegVideoCommand(
+          inputPath,
+          outputPath,
+          format,
+          config,
+          qc,
+          hwProbe.encoder,
+          void 0,
+          threadsPerProcess,
+          concurrentVariants,
+          sourceBitrateKbps
+        );
+        return;
+      } catch (err) {
+        console.warn(`[MediaProcessor] Hardware encoding (${hwProbe.encoder}) failed. Retrying with libx264... Error: ${err.message}`);
+        await fs.promises.unlink(outputPath).catch(() => {
+        });
+      }
+    }
+    await this._executeFfmpegVideoCommand(
+      inputPath,
+      outputPath,
+      format,
+      config,
+      qc,
+      requestedCodec,
+      [],
+      threadsPerProcess,
+      concurrentVariants,
+      sourceBitrateKbps
+    );
+  }
+  async _executeFfmpegVideoCommand(inputPath, outputPath, format, config, qc, actualCodec, extraCodecArgsInput, threadsPerProcess, concurrentVariants = 1, sourceBitrateKbps = null) {
+    return new Promise((resolve, reject) => {
+      if (!this.ffmpeg) return reject(new Error("[MediaProcessor] fluent-ffmpeg is not installed."));
+      const q = resolveVideoQuality(qc, config.quality);
+      const outputFormat = normaliseFormat(format);
+      const isSoftwareX264 = actualCodec === "libx264";
+      const explicitPreset = qc?.preset;
+      const preset = explicitPreset ?? resolveRuntimePreset(
+        q.preset ?? "medium",
+        os.cpus().length || 2,
+        concurrentVariants,
+        this.speedProfile
+      );
+      let videoBitrate = q.videoBitrate;
+      let maxBitrate = resolveMaxBitrate(qc, q.videoBitrate);
+      let bufsize = resolveBufsize(qc, q.videoBitrate);
+      let clampApplied = false;
+      const ladderKbps = parseKbps(q.videoBitrate);
+      if (ladderKbps != null) {
+        const clamped = clampTierToSourceBitrate(qc?.resolution, ladderKbps, sourceBitrateKbps);
+        if (clamped) {
+          videoBitrate = clamped.videoBitrate;
+          maxBitrate = clamped.maxBitrate;
+          bufsize = clamped.bufsize;
+          clampApplied = true;
+          console.log(
+            `[MediaProcessor] ${qc?.id ?? "single"}: source-bitrate-aware clamp ${q.videoBitrate} -> ${videoBitrate} (source ~${Math.round(sourceBitrateKbps)}k) \u2014 switching to ABR mode for a real size ceiling`
+          );
+        }
+      }
+      let cmd = this.ffmpeg(inputPath).addInputOptions(`-fflags +genpts`).addInputOptions(`-analyzeduration 20M`).addInputOptions(`-probesize 20M`);
+      if (config.startTime != null && config.startTime > 0)
+        cmd = cmd.inputOptions(`-ss ${config.startTime}`);
+      if (config.endTime != null) {
+        const dur = config.endTime - (config.startTime ?? 0);
+        if (dur > 0) cmd = cmd.inputOptions(`-t ${dur}`);
+      }
+      cmd = cmd.videoCodec(actualCodec);
+      if ((isSoftwareX264 || actualCodec === "libx265") && !clampApplied) {
+        cmd = cmd.addOutputOptions(`-crf ${q.crf}`);
+      }
+      if (isSoftwareX264 || actualCodec === "libx265") {
+        cmd = cmd.addOutputOptions(`-preset ${preset}`);
+      }
+      const isHwEncoder = extraCodecArgsInput === void 0;
+      const extraCodecArgs = isHwEncoder ? clampApplied ? extraArgsForAbr(actualCodec) : extraArgsFor(actualCodec) : extraCodecArgsInput;
+      if (extraCodecArgs.length > 0) {
+        for (const arg of extraCodecArgs) {
+          cmd = cmd.addOutputOptions(arg);
+        }
+      }
+      cmd = cmd.addOutputOptions(`-b:v ${videoBitrate}`).addOutputOptions(`-maxrate ${maxBitrate}`).addOutputOptions(`-bufsize ${bufsize}`).addOutputOptions(`-g 48`).addOutputOptions(`-keyint_min 48`).addOutputOptions(`-sc_threshold 0`).addOutputOptions(`-movflags +faststart`);
+      if (isSoftwareX264 && threadsPerProcess && threadsPerProcess > 0) {
+        cmd = cmd.addOutputOptions(`-threads ${threadsPerProcess}`);
+      }
+      if (isSoftwareX264) {
+        if (this.speedProfile === "speed") {
+          cmd = cmd.addOutputOptions(`-x264-params bframes=0:rc-lookahead=10`);
+        } else if (this.speedProfile === "balanced") {
+          cmd = cmd.addOutputOptions(`-x264-params rc-lookahead=20`);
+        }
+      }
+      const scaleFilter = buildScaleFilter(q.width, q.height);
+      const hwPixFmtFilter = !isSoftwareX264 ? "format=nv12" : null;
+      if (config.mute) {
+        cmd = cmd.noAudio();
+        const vf = [scaleFilter, hwPixFmtFilter].filter(Boolean).join(",");
+        if (vf) cmd = cmd.addOutputOptions(`-vf ${vf}`);
+      } else {
+        const audioBitrate = q.audioBitrate ?? "128k";
+        const audioFilter = buildAudioFilterChain(audioBitrate);
+        if (scaleFilter || hwPixFmtFilter) {
+          const videoChain = [scaleFilter, hwPixFmtFilter].filter(Boolean).join(",");
+          cmd = cmd.complexFilter(
+            `[0:v]${videoChain}[v];[0:a]${audioFilter}[a]`,
+            ["v", "a"]
+          );
+        } else {
+          cmd = cmd.addOutputOptions(`-af ${audioFilter}`).addOutputOptions(`-vf copy`);
+        }
+        cmd = cmd.audioCodec("aac").audioBitrate(audioBitrate).addOutputOptions(`-ar 48000`).addOutputOptions(`-ac 2`).addOutputOptions(`-profile:a aac_low`);
+      }
+      cmd = cmd.format(outputFormat).output(outputPath);
+      const timer = setTimeout(() => {
+        try {
+          cmd.kill("SIGKILL");
+        } catch {
+        }
+        reject(new Error(
+          `[MediaProcessor] FFmpeg timed out after ${this.timeoutMs / 1e3}s encoding variant (crf=${q.crf}, preset=${preset}, res=${q.width ?? "?"}x${q.height ?? "?"}).`
+        ));
+      }, this.timeoutMs);
+      cmd.on("end", () => {
+        clearTimeout(timer);
+        resolve();
+      }).on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }).run();
+    });
+  }
+  // ── Audio processing ──────────────────────────────────────────────────────
+  async processAudio(inputBuffer, originalMimeType, originalFilename, config) {
+    const safeBuffer = ensureBuffer(inputBuffer);
+    if (!this.canProcessMedia) {
+      console.warn("[MediaProcessor] FFmpeg not available \u2014 returning original audio.");
+      return { buffer: safeBuffer, mimeType: originalMimeType, extension: path.extname(originalFilename).slice(1) || "mp3" };
+    }
+    await this.semaphore.acquire();
+    const tmp = new TempFileManager(this.tempDir);
+    try {
+      const inputExt = path.extname(originalFilename) || inferAudioExt(originalMimeType);
+      const inputPath = tmp.create(inputExt, "source");
+      await fs.promises.writeFile(inputPath, safeBuffer);
+      return await this._encodeAudioFromPath(inputPath, originalMimeType, config, tmp);
+    } finally {
+      await tmp.cleanup();
+      this.semaphore.release();
+    }
+  }
+  async processAudioFromPath(inputPath, originalMimeType, originalFilename, config) {
+    if (!this.canProcessMedia) {
+      console.warn("[MediaProcessor] FFmpeg not available \u2014 returning passthrough.");
+      return {
+        outputPath: inputPath,
+        mimeType: originalMimeType,
+        extension: path.extname(originalFilename).slice(1) || "mp3",
+        cleanupFn: async () => {
+        }
+      };
+    }
+    await this.semaphore.acquire();
+    const tmp = new TempFileManager(this.tempDir);
+    let acquired = true;
+    try {
+      const result = await this._encodeAudioFromPath(inputPath, originalMimeType, config, tmp);
+      const releaseOnce = () => {
+        if (acquired) {
+          acquired = false;
+          this.semaphore.release();
+        }
+      };
+      return {
+        ...result,
+        cleanupFn: async () => {
+          try {
+            await tmp.cleanup();
+          } finally {
+            releaseOnce();
+          }
+        }
+      };
+    } catch (err) {
+      acquired = false;
+      this.semaphore.release();
+      await tmp.cleanup().catch(() => {
+      });
+      throw err;
+    }
+  }
+  async _encodeAudioFromPath(inputPath, originalMimeType, config, tmp) {
+    const outputFormat = normaliseFormat(config.format ?? "mp3");
+    const outputMime = inferAudioMime(outputFormat);
+    if (config.qualityConfigs && config.qualityConfigs.length > 1) {
+      const variantSpecs = config.qualityConfigs.map((qc) => ({
+        qc,
+        outputPath: tmp.create(`.${outputFormat}`, qc.id)
+      }));
+      await Promise.all(
+        variantSpecs.map(
+          ({ qc, outputPath: outputPath2 }) => this.runFFmpegAudio(inputPath, outputPath2, outputFormat, {
+            ...config,
+            qualityConfig: qc,
+            quality: qc.quality ?? config.quality,
+            audioBitrate: qc.audioBitrate ?? config.audioBitrate
+          })
+        )
+      );
+      const variantPaths = {};
+      for (const { qc, outputPath: outputPath2 } of variantSpecs) {
+        variantPaths[qc.id] = outputPath2;
+      }
+      const firstId = config.qualityConfigs[0].id;
+      return {
+        variants: {},
+        variantPaths,
+        buffer: void 0,
+        outputPath: variantPaths[firstId],
+        mimeType: outputMime,
+        extension: outputFormat
+      };
+    }
+    const outputPath = tmp.create(`.${outputFormat}`, "single");
+    await this.runFFmpegAudio(inputPath, outputPath, outputFormat, config);
+    const buffer = await fs.promises.readFile(outputPath);
+    return { buffer, outputPath, mimeType: outputMime, extension: outputFormat };
+  }
+  runFFmpegAudio(inputPath, outputPath, format, config) {
+    return new Promise((resolve, reject) => {
+      if (!this.ffmpeg) return reject(new Error("[MediaProcessor] fluent-ffmpeg is not installed."));
+      const bitrate = resolveAudioBitrate(config.qualityConfig, config.quality);
+      const outputFormat = normaliseFormat(format);
+      const audioFilter = buildAudioFilterChain(bitrate);
+      const codecMap = {
+        mp3: "libmp3lame",
+        aac: "aac",
+        ogg: "libvorbis",
+        m4a: "aac",
+        wav: "pcm_s16le",
+        flac: "flac"
+      };
+      let cmd = this.ffmpeg(inputPath).addInputOptions(`-analyzeduration 10M`).addInputOptions(`-probesize 10M`);
+      if (config.startTime != null && config.startTime > 0)
+        cmd = cmd.inputOptions(`-ss ${config.startTime}`);
+      if (config.endTime != null) {
+        const dur = config.endTime - (config.startTime ?? 0);
+        if (dur > 0) cmd = cmd.inputOptions(`-t ${dur}`);
+      }
+      const audioCodec = codecMap[outputFormat] ?? "libmp3lame";
+      cmd = cmd.noVideo().audioCodec(audioCodec).addOutputOptions(`-af ${audioFilter}`).addOutputOptions(`-ar 48000`).addOutputOptions(`-ac 2`);
+      if (audioCodec === "libmp3lame") {
+        const vbrQ = resolveVbrQuality(bitrate);
+        cmd = cmd.addOutputOptions(`-q:a ${vbrQ}`);
+      } else if (audioCodec === "libvorbis") {
+        const vbrQ = Math.max(0, Math.min(10, Math.round(parseInt(bitrate, 10) / 32)));
+        cmd = cmd.addOutputOptions(`-q:a ${vbrQ}`);
+      } else {
+        cmd = cmd.audioBitrate(bitrate);
+      }
+      cmd = cmd.format(outputFormat).output(outputPath);
+      const timer = setTimeout(() => {
+        try {
+          cmd.kill("SIGKILL");
+        } catch {
+        }
+        reject(new Error(`[MediaProcessor] FFmpeg audio timed out after ${this.timeoutMs / 1e3}s`));
+      }, this.timeoutMs);
+      cmd.on("end", () => {
+        clearTimeout(timer);
+        resolve();
+      }).on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }).run();
+    });
+  }
+  // ── Thumbnail generation ──────────────────────────────────────────────────
+  async generateVideoThumbnail(inputBuffer, originalFilename, timeSeconds) {
+    const safeBuffer = ensureBuffer(inputBuffer);
+    if (!this.canProcessMedia) throw new Error("[MediaProcessor] FFmpeg not available for thumbnail generation");
+    await this.semaphore.acquire();
+    const tmp = new TempFileManager(this.tempDir);
+    try {
+      const inputPath = tmp.create(path.extname(originalFilename) || ".mp4", "source");
+      await fs.promises.writeFile(inputPath, safeBuffer);
+      return await this.generateVideoThumbnailBuffer(inputPath, timeSeconds, tmp, "thumb");
+    } finally {
+      await tmp.cleanup();
+      this.semaphore.release();
+    }
+  }
+  async generateVideoThumbnailFromPath(inputPath, timeSeconds) {
+    if (!this.canProcessMedia) throw new Error("[MediaProcessor] FFmpeg not available for thumbnail generation");
+    const tmp = new TempFileManager(this.tempDir);
+    try {
+      return await this.generateVideoThumbnailBuffer(inputPath, timeSeconds, tmp, "thumb");
+    } finally {
+      await tmp.cleanup();
+    }
+  }
+  /**
+   * [FIX 1] Now takes a variantId so its temp output is named predictably
+   * (e.g. "<session>_thumb.jpg" or "<session>_480p_thumb.jpg") instead of
+   * a fresh random suffix on every call — reusing the create() idempotency
+   * from TempFileManager when the same id is requested twice.
+   */
+  generateVideoThumbnailBuffer(inputPath, timeSeconds, tmp, variantId = "thumb") {
+    return new Promise(async (resolve, reject) => {
+      if (!this.ffmpeg) return reject(new Error("[MediaProcessor] fluent-ffmpeg is not installed."));
+      let seekTime;
+      if (timeSeconds != null && timeSeconds > 0) {
+        seekTime = timeSeconds;
+      } else {
+        seekTime = 5;
+        try {
+          const duration = await this.getVideoDuration(inputPath, this.ffmpeg);
+          if (duration > 0) seekTime = Math.max(0.1, duration * 0.1);
+        } catch {
+        }
+      }
+      const outputPath = tmp.create(".jpg", variantId);
+      const timer = setTimeout(
+        () => reject(new Error("[MediaProcessor] Thumbnail timed out after 30s")),
+        3e4
+      );
+      this.ffmpeg(inputPath).seekInput(seekTime).frames(1).videoFilters("scale=320:180:flags=fast_bilinear:force_original_aspect_ratio=decrease").outputOptions([
+        "-q:v 4",
+        "-update 1"
+      ]).output(outputPath).on("end", async () => {
+        clearTimeout(timer);
+        try {
+          const raw = await fs.promises.readFile(outputPath);
+          resolve(this.sharp ? await this.sharp(raw).jpeg({ quality: 80, mozjpeg: true }).toBuffer() : raw);
+        } catch (err) {
+          reject(err);
+        }
+      }).on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }).run();
+    });
+  }
+  getVideoDuration(inputPath, ffmpeg) {
+    return new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(inputPath, (err, metadata) => {
+        if (err) return reject(err);
+        resolve(metadata?.format?.duration ?? 0);
+      });
+    });
+  }
+  // ── Public helpers (used by UploadEngine) ─────────────────────────────────
+  async assembleChunksToDisk(chunks, ext) {
+    const outputPath = path.join(
+      this.tempDir,
+      `upload_assembled_${Date.now()}_${Math.random().toString(36).substring(2, 9)}${ext}`
+    );
+    await assembleChunksToDisk(chunks, outputPath);
+    return outputPath;
+  }
+  async writeTempFile(buffer, ext) {
+    const safeBuffer = ensureBuffer(buffer);
+    const name = `upload_tmp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}${ext}`;
+    const fullPath = path.join(this.tempDir, name);
+    await fs.promises.writeFile(fullPath, safeBuffer);
+    return fullPath;
+  }
+  async deleteTempFile(filePath) {
+    try {
+      if (fs.existsSync(filePath)) await fs.promises.unlink(filePath);
+    } catch {
+    }
+  }
+};
+function resolveImageOutputMime(format, original) {
+  const f = format ?? inferImageFormat(original);
+  const map = {
+    jpeg: "image/jpeg",
+    jpg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    avif: "image/avif",
+    gif: "image/gif"
+  };
+  return map[f] ?? original;
+}
+function resolveImageOutputExt(format, original) {
+  const f = format ?? inferImageFormat(original);
+  return f === "jpeg" ? "jpg" : f;
+}
+function inferImageFormat(mimeType) {
+  if (mimeType.includes("png")) return "png";
+  if (mimeType.includes("webp")) return "webp";
+  if (mimeType.includes("avif")) return "avif";
+  if (mimeType.includes("gif")) return "gif";
+  return "jpeg";
+}
+function inferVideoExt(mimeType) {
+  if (mimeType.includes("webm")) return ".webm";
+  if (mimeType.includes("quicktime")) return ".mov";
+  if (mimeType.includes("x-msvideo")) return ".avi";
+  if (mimeType.includes("x-matroska")) return ".mkv";
+  return ".mp4";
+}
+function inferAudioExt(mimeType) {
+  if (mimeType.includes("wav")) return ".wav";
+  if (mimeType.includes("ogg")) return ".ogg";
+  if (mimeType.includes("aac")) return ".aac";
+  if (mimeType.includes("flac")) return ".flac";
+  if (mimeType.includes("mp4") || mimeType.includes("m4a")) return ".m4a";
+  return ".mp3";
+}
+function inferAudioMime(format) {
+  const map = {
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+    aac: "audio/aac",
+    flac: "audio/flac",
+    m4a: "audio/mp4"
+  };
+  return map[format] ?? "audio/mpeg";
+}
+
+// src/core/UploadEngine.ts
+function ensureBuffer2(input) {
+  if (Buffer.isBuffer(input)) return input;
+  if (input instanceof ArrayBuffer) return Buffer.from(input);
+  if (input instanceof Uint8Array) return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  return Buffer.from(input);
+}
+async function streamFileToStorage(storage, fileId, filePath, ctx) {
+  const stat = await fs2.promises.stat(filePath);
+  if (storage.putStream) {
+    const stream = fs2.createReadStream(filePath);
+    const result2 = await storage.putStream(fileId, stream, ctx);
+    return {
+      url: result2.url,
+      storageRef: result2.storageRef,
+      chunkCount: typeof result2.chunkCount === "number" ? result2.chunkCount : 1,
+      chunkSize: typeof result2.chunkSize === "number" ? result2.chunkSize : stat.size,
+      totalSize: typeof result2.totalSize === "number" ? result2.totalSize : stat.size
+    };
+  }
+  const buffer = await fs2.promises.readFile(filePath);
+  const result = await storage.putObject(fileId, buffer, ctx);
+  return {
+    url: result.url,
+    storageRef: result.storageRef,
+    chunkCount: typeof result.chunkCount === "number" ? result.chunkCount : 1,
+    chunkSize: typeof result.chunkSize === "number" ? result.chunkSize : buffer.length,
+    totalSize: typeof result.totalSize === "number" ? result.totalSize : buffer.length
+  };
+}
+function buildVariantFileId(primaryFileId, qualityId) {
+  return `${primaryFileId}_${qualityId}`;
+}
+var UploadEngine = class {
+  config;
+  mediaProcessor;
+  constructor(config) {
+    this.config = resolveUploadConfig(config);
+    this.mediaProcessor = new MediaProcessor(config.mediaProcessor ?? {});
+  }
   handle = async (req, res) => {
     try {
       const contentType = this.getContentType(req);
-      if (!contentType.includes("multipart/form-data")) {
+      if (!contentType.includes("multipart/form-data"))
         throw new ValidationError("Content-Type must be multipart/form-data", 400);
-      }
       let uploadType = this.getUploadType(req);
-      if (!uploadType && this.config.defaultUploadType) {
-        uploadType = this.config.defaultUploadType;
-      }
-      if (!uploadType || !this.config.uploadTypes[uploadType]) {
+      if (!uploadType && this.config.defaultUploadType) uploadType = this.config.defaultUploadType;
+      if (!uploadType || !this.config.uploadTypes[uploadType])
         throw new ValidationError(
           `Invalid or missing uploadType. Available: ${Object.keys(this.config.uploadTypes).join(", ")}`,
           400
         );
-      }
       const typeConfig = this.config.uploadTypes[uploadType];
       const storageKey = resolveStorageKey(this.config, typeConfig);
       const storage = this.config.storages[storageKey];
-      if (!storage) {
-        throw new ValidationError(`Storage '${storageKey}' not configured`, 500);
-      }
-      const fieldValidation = this.buildFieldValidation(typeConfig);
-      const fileValidation = this.buildFileValidation(typeConfig);
+      if (!storage) throw new ValidationError(`Storage '${storageKey}' not configured`, 500);
       const parsed = await MultipartParser.parseBuffered(req, {
         maxFieldSize: this.config.maxFieldSize || 1 * 1024 * 1024,
         maxFileSize: resolveSizeLimit(this.config, typeConfig, "unknown"),
         maxFiles: this.config.maxFiles || 10,
         maxTotalSize: this.config.maxTotalSize || 500 * 1024 * 1024,
-        fieldValidation,
-        fileValidation,
+        fieldValidation: this.buildFieldValidation(typeConfig),
+        fileValidation: this.buildFileValidation(typeConfig),
         onProgress: this.config.onProgress
       });
       req.fields = parsed.fields || {};
       req.files = parsed.files || [];
-      const isChunked = this.isChunkedUpload(parsed.fields);
+      let transformer;
       if (parsed.fields.transformer) {
         try {
-          req.transformer = JSON.parse(parsed.fields.transformer);
+          transformer = typeof parsed.fields.transformer === "string" ? JSON.parse(parsed.fields.transformer) : parsed.fields.transformer;
         } catch {
-          req.transformer = parsed.fields.transformer;
+          transformer = void 0;
         }
       }
-      if (isChunked) {
-        return await this.handleChunkedUpload(req, res, parsed, uploadType, storage, typeConfig);
+      req.transformer = transformer;
+      if (this.isChunkedUpload(parsed.fields)) {
+        return await this.handleChunkedUpload(req, res, parsed, uploadType, storage, typeConfig, transformer);
       } else {
-        return await this.handleNonChunkedUpload(req, res, parsed, uploadType, storage, typeConfig);
+        return await this.handleNonChunkedUpload(req, res, parsed, uploadType, storage, typeConfig, transformer);
       }
     } catch (error) {
       return await this.handleError(error, this.getUploadType(req), res);
     }
   };
-  /**
-   * Detect chunked upload by checking for required chunked fields.
-   * Proper detection - no assumptions.
-   */
-  isChunkedUpload(fields) {
-    const hasSessionId = fields.sessionId && typeof fields.sessionId === "string";
-    const hasChunkIndex = fields.chunkIndex !== void 0 && !isNaN(parseInt(String(fields.chunkIndex)));
-    const hasTotalChunks = fields.totalChunks !== void 0 && !isNaN(parseInt(String(fields.totalChunks)));
-    return hasSessionId && hasChunkIndex && hasTotalChunks;
-  }
-  /**
-   * Handle chunked upload from the worker.
-   * FIXED: Fully adaptive to frontend chunk config changes
-   */
-  async handleChunkedUpload(req, res, parsed, uploadType, storage, typeConfig) {
+  // ── Chunked upload ────────────────────────────────────────────────────────
+  async handleChunkedUpload(req, res, parsed, uploadType, storage, typeConfig, transformer) {
     const sessionId = String(parsed.fields.sessionId);
     const chunkIndex = parseInt(String(parsed.fields.chunkIndex), 10);
     const totalChunks = parseInt(String(parsed.fields.totalChunks), 10);
@@ -576,69 +1791,21 @@ var UploadEngine = class {
     const mimetype = String(parsed.fields.mimetype);
     const totalSize = parseInt(String(parsed.fields.totalSize || 0), 10);
     const chunksize = parseInt(String(parsed.fields.chunksize || 0), 10);
-    if (!sessionId || isNaN(chunkIndex) || isNaN(totalChunks)) {
+    if (!sessionId || isNaN(chunkIndex) || isNaN(totalChunks))
       throw new ValidationError("Missing or invalid chunked upload fields", 400);
-    }
-    if (!parsed.files || parsed.files.length === 0) {
+    if (!parsed.files || parsed.files.length === 0)
       throw new ValidationError("No chunk data received", 400);
-    }
     const chunkFile = parsed.files[0];
+    const chunkBuffer = ensureBuffer2(chunkFile.buffer);
     const kind = detectKind(mimetype);
-    const frontendChunkSize = chunksize > 0 ? chunksize : chunkFile.size;
-    const frontendTotalSize = totalSize > 0 ? totalSize : chunkFile?.size * totalChunks;
     assertKindAllowed(kind, typeConfig);
-    assertWithinLimit(chunkFile.size, resolveSizeLimit(this.config, typeConfig, kind), "File size");
-    let fileId;
+    assertWithinLimit(chunkBuffer.length, resolveSizeLimit(this.config, typeConfig, kind), "File size");
+    const actualTotalSize = totalSize > 0 ? totalSize : chunkBuffer.length * totalChunks;
+    const actualChunkSize = chunkBuffer.length;
     let existingFile = null;
-    if (this.config.database) {
-      existingFile = await this.config.database.getFileBySessionId(sessionId);
-    }
-    if (existingFile) {
-      fileId = existingFile.id;
-    } else {
-      fileId = this.generateFileId();
-    }
+    if (this.config.database) existingFile = await this.config.database.getFileBySessionId(sessionId);
+    const fileId = existingFile?.id ?? this.generateFileId();
     const isLastChunk = chunkIndex === totalChunks - 1;
-    let actualTotalSize = frontendTotalSize;
-    let actualChunkSize = frontendChunkSize;
-    if (isLastChunk) {
-      actualChunkSize = chunkFile.size;
-      if (existingFile && existingFile.size > 0) {
-        actualTotalSize = existingFile.size;
-      } else {
-        actualTotalSize = chunkFile.size * totalChunks - (frontendChunkSize - chunkFile.size);
-        try {
-          let totalReceived = 0;
-          for (let i = 0; i < totalChunks - 1; i++) {
-            try {
-              const prevChunk = await this.getChunkSize(fileId, i);
-              if (prevChunk > 0) {
-                totalReceived += prevChunk;
-              }
-            } catch {
-              totalReceived += frontendChunkSize;
-            }
-          }
-          totalReceived += chunkFile.size;
-          if (totalReceived > 0) {
-            actualTotalSize = totalReceived;
-          }
-        } catch {
-          actualTotalSize = frontendChunkSize * totalChunks;
-        }
-      }
-    } else {
-      actualChunkSize = frontendChunkSize;
-      if (chunkIndex === 0 && !existingFile) {
-        actualTotalSize = frontendTotalSize || frontendChunkSize * totalChunks;
-      }
-    }
-    if (existingFile && existingFile.chunkSize > 0) {
-      const storedChunkSize = existingFile.chunkSize;
-      if (storedChunkSize !== actualChunkSize && chunkIndex > 0) {
-        actualChunkSize = frontendChunkSize;
-      }
-    }
     const storageCtx = {
       originalName: filename,
       contentType: mimetype,
@@ -649,8 +1816,8 @@ var UploadEngine = class {
       chunkSize: actualChunkSize,
       uploadType
     };
-    await storage.writeChunk(fileId, chunkIndex, chunkFile.buffer, storageCtx);
-    if (chunkIndex === 0 && this.config.database) {
+    await storage.writeChunk(fileId, chunkIndex, chunkBuffer, storageCtx);
+    if (chunkIndex === 0 && this.config.database && !existingFile) {
       const metadata = this.extractCustomFields(parsed.fields, [
         "sessionId",
         "chunkIndex",
@@ -659,128 +1826,32 @@ var UploadEngine = class {
         "mimetype",
         "uploadType",
         "totalSize",
-        "chunksize"
+        "chunksize",
+        "transformer"
       ]);
-      metadata._frontendChunkConfig = {
-        chunkSize: frontendChunkSize,
-        totalSize: frontendTotalSize,
-        totalChunks,
-        timestamp: Date.now()
-      };
-      if (!existingFile) {
-        const fileRecord = await this.config.database.createFile({
-          id: fileId,
-          sessionId,
-          originalName: filename,
-          storedName: this.sanitizeFilename(filename),
-          fieldname: parsed.fields.fieldname || "file",
-          contentType: mimetype,
-          kind,
-          size: actualTotalSize,
-          chunkSize: actualChunkSize,
-          chunkCount: totalChunks,
-          uploadType,
-          bucket: typeConfig.bucket || uploadType,
-          storageProvider: resolveStorageKey(this.config, typeConfig),
-          storageRef: `${uploadType}/${sessionId}/${fileId}`,
-          isComplete: false,
-          metadata
-        });
-      } else {
-        if (existingFile.size !== actualTotalSize || existingFile.chunkSize !== actualChunkSize) {
-          await this.config.database.updateFile(fileId, {
-            size: actualTotalSize,
-            chunkSize: actualChunkSize,
-            chunkCount: totalChunks,
-            metadata: { ...existingFile.metadata, ...metadata },
-            updatedAt: Date.now()
-          });
-        }
-      }
+      if (transformer) metadata._transformer = transformer;
+      await this.config.database.createFile({
+        id: fileId,
+        sessionId,
+        originalName: filename,
+        storedName: this.sanitizeFilename(filename),
+        fieldname: parsed.fields.fieldname || "file",
+        contentType: mimetype,
+        kind,
+        size: actualTotalSize,
+        chunkSize: actualChunkSize,
+        chunkCount: totalChunks,
+        uploadType,
+        bucket: typeConfig.bucket || uploadType,
+        storageProvider: resolveStorageKey(this.config, typeConfig),
+        storageRef: `${uploadType}/${sessionId}/${fileId}`,
+        isComplete: false,
+        metadata
+      });
     }
-    if (isLastChunk && this.config.database) {
-      const currentFile = await this.config.database.getFileById(fileId);
-      if (currentFile) {
-        if (currentFile.size !== actualTotalSize) {
-          await this.config.database.updateFile(fileId, {
-            size: actualTotalSize,
-            chunkSize: actualChunkSize,
-            chunkCount: totalChunks,
-            updatedAt: Date.now()
-          });
-        }
-      }
-    }
-    if (isLastChunk) {
-      const storageResult = await storage.finalize(fileId, storageCtx);
-      const finalUrl = storageResult.url;
-      const finalStorageRef = storageResult.storageRef;
-      let finalFileRecord = null;
-      if (this.config.database) {
-        const fileRecord = await this.config.database.updateFile(fileId, {
-          isComplete: true,
-          storageRef: finalStorageRef,
-          url: finalUrl,
-          size: actualTotalSize,
-          chunkSize: actualChunkSize,
-          updatedAt: Date.now()
-        });
-        if (fileRecord) {
-          finalFileRecord = fileRecord;
-          this.config.onUploadComplete?.(fileRecord);
-        }
-      } else {
-        finalFileRecord = {
-          id: fileId,
-          sessionId,
-          originalName: filename,
-          url: finalUrl,
-          storageRef: finalStorageRef,
-          uploadType,
-          size: actualTotalSize,
-          chunkSize: actualChunkSize,
-          isComplete: true,
-          createdAt: Date.now(),
-          updatedAt: Date.now()
-        };
-        this.config.onUploadComplete?.(finalFileRecord);
-      }
-      let parentFileRecord;
-      if (parsed.fields.parentSessionId && this.config.database) {
-        const parent = await this.config.database.getFileBySessionId(parsed.fields.parentSessionId);
-        if (parent) {
-          const quality = parsed.fields.quality || "unknown";
-          const currentMetadata = parent.metadata || {};
-          const variants = currentMetadata.variants || {};
-          variants[quality] = finalUrl;
-          parentFileRecord = await this.config.database.updateFile(parent.id, {
-            metadata: { ...currentMetadata, variants }
-          }) || void 0;
-        }
-      }
+    if (!isLastChunk) {
       const result = {
-        status: "success",
-        message: `File uploaded successfully`,
-        fileId,
-        url: finalUrl,
-        storageRef: finalStorageRef,
-        progress: 100,
-        metadata: this.extractCustomFields(parsed.fields),
-        fields: this.extractCustomFields(parsed.fields),
-        file: finalFileRecord,
-        fileFields: { [finalFileRecord.fieldname || "file"]: finalFileRecord },
-        parentFile: parentFileRecord
-      };
-      req.fileFields = { [finalFileRecord.fieldname || "file"]: finalFileRecord };
-      const autoRespond = typeConfig.autoRespond ?? this.config.autoRespond;
-      if (autoRespond) {
-        res.status(200);
-        res.json(result);
-      }
-      return result;
-    } else {
-      const result = {
-        status: "success",
+        status: "chunk_received",
         message: `Chunk ${chunkIndex + 1}/${totalChunks} received`,
         progress: Math.round((chunkIndex + 1) / totalChunks * 100),
         chunkIndex,
@@ -791,90 +1862,400 @@ var UploadEngine = class {
       res.json(result);
       return result;
     }
-  }
-  /**
-   * Helper method to get chunk size from storage
-   */
-  async getChunkSize(fileId, chunkIndex) {
-    return 0;
-  }
-  /**
-   * Handle non-chunked upload (regular file).
-   */
-  async handleNonChunkedUpload(req, res, parsed, uploadType, storage, typeConfig) {
-    if (!parsed.files || parsed.files.length === 0) {
-      throw new ValidationError("No files provided", 400);
-    }
-    const uploadResults = [];
-    for (const file of parsed.files) {
-      const kind = detectKind(file.mimetype);
-      assertKindAllowed(kind, typeConfig);
-      assertWithinLimit(file.size, resolveSizeLimit(this.config, typeConfig, kind), "File size");
-      const fileId = this.generateFileId();
-      const sessionId = this.generateSessionId();
-      const storageResult = await storage.putObject(fileId, file.buffer, {
-        originalName: file.filename,
-        contentType: file.mimetype,
-        bucket: typeConfig.bucket || uploadType
-      });
-      const finalUrl = storageResult.url;
-      const finalStorageRef = storageResult.storageRef;
+    const inputExt = path2.extname(filename) || inferExtFromMime(mimetype);
+    let assembledPath = null;
+    let processedResult = null;
+    try {
+      assembledPath = await this.assembleChunksToDisk(
+        storage,
+        fileId,
+        totalChunks,
+        inputExt,
+        storageCtx
+      );
+      let finalMimeType = mimetype;
+      let finalFilename = filename;
+      if (transformer && this.shouldProcessMedia(mimetype, transformer, storage)) {
+        try {
+          processedResult = await this.processMediaFromPath(
+            assembledPath,
+            mimetype,
+            filename,
+            transformer
+          );
+          if (processedResult) {
+            finalMimeType = processedResult.mimeType;
+            finalFilename = replaceExtension(filename, `.${processedResult.extension}`);
+          }
+        } catch (processingError) {
+          console.error("[UploadEngine] Media processing failed, storing raw:", processingError);
+          processedResult = null;
+        }
+      }
+      const variantResults = {};
+      const variantFileIds = {};
+      let finalUrl;
+      let finalStorageRef;
+      let primaryEncodedSize = actualTotalSize;
+      let primaryChunkCount = 1;
+      let primaryChunkSize = actualChunkSize;
+      if (processedResult?.variantPaths && Object.keys(processedResult.variantPaths).length > 0) {
+        const entries = Object.entries(processedResult.variantPaths);
+        await Promise.all(entries.map(async ([qualityId, variantPath], i) => {
+          const isPrimary = i === 0;
+          const variantFileId = isPrimary ? fileId : buildVariantFileId(fileId, qualityId);
+          const variantFilename = buildVariantFilename(filename, qualityId, processedResult.extension);
+          const variantCtx = {
+            ...storageCtx,
+            originalName: variantFilename,
+            contentType: processedResult.mimeType
+            // totalChunks/chunkIndex below describe the ORIGINAL upload context,
+            // not the variant's own chunking — the adapter computes the variant's
+            // real chunkCount/chunkSize itself and returns it from putStream().
+          };
+          const vr = await streamFileToStorage(storage, variantFileId, variantPath, variantCtx);
+          if (isPrimary) {
+            finalUrl = vr.url;
+            finalStorageRef = vr.storageRef;
+            primaryEncodedSize = vr.totalSize;
+            primaryChunkCount = vr.chunkCount;
+            primaryChunkSize = vr.chunkSize;
+          }
+          variantResults[qualityId] = { url: vr.url, storageRef: vr.storageRef, fileId: variantFileId };
+          if (!isPrimary) {
+            variantFileIds[qualityId] = variantFileId;
+            if (this.config.database) {
+              const vRecord = await this.config.database.createFile({
+                id: variantFileId,
+                sessionId: `${sessionId}_${qualityId}`,
+                originalName: variantFilename,
+                storedName: this.sanitizeFilename(variantFilename),
+                fieldname: parsed.fields.fieldname || "file",
+                contentType: processedResult.mimeType,
+                kind,
+                size: vr.totalSize,
+                // FIX: real chunk geometry from the adapter, not a hardcoded 1.
+                // For a large variant written via DatabaseStorageAdapter.putStream,
+                // chunkCount will be >1 and chunkSize matches what was actually
+                // written, so FileServingHandler's ChunkReadStream can correctly
+                // address every chunk (chunkNumber * chunkSize = exact byte offset,
+                // with the final chunk sized to the true remainder).
+                chunkSize: vr.chunkSize,
+                chunkCount: vr.chunkCount,
+                uploadType,
+                bucket: typeConfig.bucket || uploadType,
+                storageProvider: resolveStorageKey(this.config, typeConfig),
+                storageRef: vr.storageRef,
+                url: vr.url,
+                isComplete: true,
+                metadata: { parentFileId: fileId, quality: qualityId, isVariant: true }
+              });
+              this.config.onUploadComplete?.(vRecord);
+            }
+          }
+        }));
+      } else {
+        const sourcePath = processedResult?.outputPath ?? assembledPath;
+        const singleCtx = {
+          ...storageCtx,
+          originalName: finalFilename,
+          contentType: finalMimeType
+        };
+        const sr = await streamFileToStorage(storage, fileId, sourcePath, singleCtx);
+        finalUrl = sr.url;
+        finalStorageRef = sr.storageRef;
+        primaryEncodedSize = sr.totalSize;
+        primaryChunkCount = sr.chunkCount;
+        primaryChunkSize = sr.chunkSize;
+      }
+      let thumbnailUrl;
+      let thumbnailStorageRef;
+      if (processedResult?.thumbnail && storage.putObject) {
+        try {
+          const thumbId = `thumb_${fileId}`;
+          const thumbCtx = {
+            ...storageCtx,
+            originalName: `${path2.basename(filename, path2.extname(filename))}_thumb.jpg`,
+            contentType: "image/jpeg"
+          };
+          const tr = await storage.putObject(thumbId, processedResult.thumbnail, thumbCtx);
+          thumbnailUrl = tr.url;
+          thumbnailStorageRef = tr.storageRef;
+        } catch (e) {
+          console.warn("[UploadEngine] Thumbnail upload failed:", e);
+        }
+      }
       let finalFileRecord = null;
       if (this.config.database) {
-        const fileRecord = await this.config.database.createFile({
+        finalFileRecord = await this.config.database.updateFile(fileId, {
+          isComplete: true,
+          storageRef: finalStorageRef,
+          url: finalUrl,
+          contentType: finalMimeType,
+          originalName: finalFilename,
+          storedName: this.sanitizeFilename(finalFilename),
+          size: primaryEncodedSize,
+          chunkCount: primaryChunkCount,
+          chunkSize: primaryChunkSize,
+          thumbnailUrl,
+          thumbnailRef: thumbnailStorageRef,
+          ...Object.keys(variantFileIds).length > 0 ? { variantFileIds } : {},
+          updatedAt: Date.now()
+        });
+      } else {
+        finalFileRecord = {
           id: fileId,
           sessionId,
-          originalName: file.filename,
-          storedName: this.sanitizeFilename(file.filename),
-          fieldname: file.fieldname || "file",
-          contentType: file.mimetype,
+          originalName: finalFilename,
+          storedName: this.sanitizeFilename(finalFilename),
+          fieldname: parsed.fields.fieldname || "file",
+          contentType: finalMimeType,
           kind,
-          size: file.size,
-          chunkSize: file.size,
-          chunkCount: 1,
+          size: primaryEncodedSize,
+          chunkSize: primaryChunkSize,
+          chunkCount: primaryChunkCount,
           uploadType,
           bucket: typeConfig.bucket || uploadType,
           storageProvider: resolveStorageKey(this.config, typeConfig),
           storageRef: finalStorageRef,
           url: finalUrl,
-          isComplete: true,
-          // Store custom fields as metadata
-          metadata: this.extractCustomFields(parsed.fields)
-        });
-        finalFileRecord = fileRecord;
-        this.config.onUploadComplete?.(fileRecord);
-      } else {
-        finalFileRecord = {
-          id: fileId,
-          sessionId,
-          originalName: file.filename,
-          url: finalUrl,
-          storageRef: finalStorageRef,
-          uploadType,
+          thumbnailUrl,
           isComplete: true,
           createdAt: Date.now(),
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
+          ...Object.keys(variantFileIds).length > 0 ? { variantFileIds } : {}
         };
-        this.config.onUploadComplete?.(finalFileRecord);
       }
+      if (finalFileRecord) this.config.onUploadComplete?.(finalFileRecord);
       const result = {
         status: "success",
-        message: `File uploaded successfully`,
+        message: "File uploaded successfully",
         fileId,
         url: finalUrl,
         storageRef: finalStorageRef,
         progress: 100,
         metadata: this.extractCustomFields(parsed.fields),
-        file: finalFileRecord
+        fields: this.extractCustomFields(parsed.fields),
+        file: finalFileRecord ?? void 0,
+        fileFields: finalFileRecord ? { [finalFileRecord.fieldname || "file"]: finalFileRecord } : void 0,
+        thumbnailUrl,
+        ...Object.keys(variantResults).length > 0 ? { variants: variantResults } : {}
       };
-      uploadResults.push(result);
+      if (finalFileRecord) req.fileFields = { [finalFileRecord.fieldname || "file"]: finalFileRecord };
+      const autoRespond = typeConfig.autoRespond ?? this.config.autoRespond;
+      if (autoRespond) {
+        res.status(200);
+        res.json(result);
+      }
+      return result;
+    } finally {
+      if (processedResult?.cleanupFn) {
+        await processedResult.cleanupFn().catch(
+          (e) => console.warn("[UploadEngine] Processed temp cleanup failed:", e)
+        );
+      }
+      if (assembledPath) {
+        await this.mediaProcessor.deleteTempFile(assembledPath).catch(() => {
+        });
+      }
+    }
+  }
+  // ── Non-chunked upload ────────────────────────────────────────────────────
+  async handleNonChunkedUpload(req, res, parsed, uploadType, storage, typeConfig, transformer) {
+    if (!parsed.files || parsed.files.length === 0)
+      throw new ValidationError("No files provided", 400);
+    const uploadResults = [];
+    for (const file of parsed.files) {
+      const kind = detectKind(file.mimetype);
+      assertKindAllowed(kind, typeConfig);
+      const originalBuffer = ensureBuffer2(file.buffer);
+      assertWithinLimit(originalBuffer.length, resolveSizeLimit(this.config, typeConfig, kind), "File size");
+      const fileId = this.generateFileId();
+      const sessionId = this.generateSessionId();
+      let processedBuffer = originalBuffer;
+      let processedMimeType = file.mimetype;
+      let processedFilename = file.filename;
+      let processedResult = null;
+      let thumbnailUrl;
+      if (transformer && this.shouldProcessMedia(file.mimetype, transformer, storage)) {
+        try {
+          const inputExt = path2.extname(file.filename) || inferExtFromMime(file.mimetype);
+          const inputPath = await this.mediaProcessor.writeTempFile(originalBuffer, inputExt);
+          try {
+            processedResult = await this.processMediaFromPath(inputPath, file.mimetype, file.filename, transformer);
+            if (processedResult?.buffer) {
+              processedBuffer = processedResult.buffer;
+              processedMimeType = processedResult.mimeType;
+              processedFilename = replaceExtension(file.filename, `.${processedResult.extension}`);
+            }
+          } finally {
+            await this.mediaProcessor.deleteTempFile(inputPath).catch(() => {
+            });
+          }
+        } catch (processingError) {
+          console.error("[UploadEngine] Media processing failed, using raw file:", processingError);
+        }
+      }
+      const primaryTempPath = await this.mediaProcessor.writeTempFile(processedBuffer, path2.extname(processedFilename) || ".bin");
+      let storageResult;
+      try {
+        storageResult = await streamFileToStorage(storage, fileId, primaryTempPath, {
+          originalName: processedFilename,
+          contentType: processedMimeType,
+          bucket: typeConfig.bucket || uploadType,
+          uploadType
+        });
+      } finally {
+        await this.mediaProcessor.deleteTempFile(primaryTempPath).catch(() => {
+        });
+      }
+      if (processedResult?.thumbnail && storage.putObject) {
+        try {
+          const tr = await storage.putObject(`thumb_${fileId}`, processedResult.thumbnail, {
+            originalName: `${path2.basename(file.filename, path2.extname(file.filename))}_thumb.jpg`,
+            contentType: "image/jpeg",
+            bucket: typeConfig.bucket || uploadType,
+            totalSize: processedResult.thumbnail.length,
+            chunkSize: processedResult.thumbnail.length,
+            chunkCount: 1,
+            uploadType
+          });
+          thumbnailUrl = tr.url;
+        } catch (e) {
+          console.warn("[UploadEngine] Thumbnail upload failed:", e);
+        }
+      }
+      const variantResults = {};
+      const variantFileIds = {};
+      if (processedResult?.variants && Object.keys(processedResult.variants).length > 1) {
+        const entries = Object.entries(processedResult.variants);
+        await Promise.all(entries.map(async ([qualityId, variantBuffer], i) => {
+          const isPrimary = i === 0;
+          const variantFileId = isPrimary ? fileId : buildVariantFileId(fileId, qualityId);
+          const variantName = buildVariantFilename(file.filename, qualityId, processedResult.extension);
+          if (isPrimary) {
+            variantResults[qualityId] = { url: storageResult.url, storageRef: storageResult.storageRef, fileId };
+          } else {
+            const variantTempPath = await this.mediaProcessor.writeTempFile(
+              variantBuffer,
+              `.${processedResult.extension}`
+            );
+            let vr;
+            try {
+              vr = await streamFileToStorage(storage, variantFileId, variantTempPath, {
+                originalName: variantName,
+                contentType: processedResult.mimeType,
+                bucket: typeConfig.bucket || uploadType,
+                uploadType
+              });
+            } finally {
+              await this.mediaProcessor.deleteTempFile(variantTempPath).catch(() => {
+              });
+            }
+            variantResults[qualityId] = { url: vr.url, storageRef: vr.storageRef, fileId: variantFileId };
+            variantFileIds[qualityId] = variantFileId;
+            if (this.config.database) {
+              const vRecord = await this.config.database.createFile({
+                id: variantFileId,
+                sessionId: `${sessionId}_${qualityId}`,
+                originalName: variantName,
+                storedName: this.sanitizeFilename(variantName),
+                fieldname: file.fieldname || "file",
+                contentType: processedResult.mimeType,
+                kind,
+                size: vr.totalSize,
+                chunkSize: vr.chunkSize,
+                chunkCount: vr.chunkCount,
+                uploadType,
+                bucket: typeConfig.bucket || uploadType,
+                storageProvider: resolveStorageKey(this.config, typeConfig),
+                storageRef: vr.storageRef,
+                url: vr.url,
+                isComplete: true,
+                metadata: { parentFileId: fileId, quality: qualityId, isVariant: true }
+              });
+              this.config.onUploadComplete?.(vRecord);
+            }
+          }
+        }));
+      }
+      if (processedResult?.cleanupFn) {
+        await processedResult.cleanupFn().catch(
+          (e) => console.warn("[UploadEngine] Processed temp cleanup failed:", e)
+        );
+      }
+      let finalFileRecord = null;
+      const meta = {
+        ...this.extractCustomFields(parsed.fields),
+        ...transformer ? { _transformer: transformer } : {},
+        ...Object.keys(variantFileIds).length > 0 ? { variantFileIds } : {}
+      };
+      if (this.config.database) {
+        finalFileRecord = await this.config.database.createFile({
+          id: fileId,
+          sessionId,
+          originalName: processedFilename,
+          storedName: this.sanitizeFilename(processedFilename),
+          fieldname: file.fieldname || "file",
+          contentType: processedMimeType,
+          kind,
+          size: storageResult.totalSize,
+          chunkSize: storageResult.chunkSize,
+          chunkCount: storageResult.chunkCount,
+          uploadType,
+          bucket: typeConfig.bucket || uploadType,
+          storageProvider: resolveStorageKey(this.config, typeConfig),
+          storageRef: storageResult.storageRef,
+          url: storageResult.url,
+          thumbnailUrl,
+          isComplete: true,
+          metadata: meta
+        });
+        this.config.onUploadComplete?.(finalFileRecord);
+      } else {
+        finalFileRecord = {
+          id: fileId,
+          sessionId,
+          originalName: processedFilename,
+          storedName: this.sanitizeFilename(processedFilename),
+          fieldname: file.fieldname || "file",
+          contentType: processedMimeType,
+          kind,
+          size: storageResult.totalSize,
+          chunkSize: storageResult.chunkSize,
+          chunkCount: storageResult.chunkCount,
+          uploadType,
+          bucket: typeConfig.bucket || uploadType,
+          storageProvider: resolveStorageKey(this.config, typeConfig),
+          storageRef: storageResult.storageRef,
+          url: storageResult.url,
+          thumbnailUrl,
+          isComplete: true,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          ...Object.keys(variantFileIds).length > 0 ? { variantFileIds } : {}
+        };
+        this.config.onUploadComplete?.(finalFileRecord);
+      }
+      uploadResults.push({
+        status: "success",
+        message: "File uploaded successfully",
+        fileId,
+        url: storageResult.url,
+        storageRef: storageResult.storageRef,
+        progress: 100,
+        metadata: this.extractCustomFields(parsed.fields),
+        file: finalFileRecord ?? void 0,
+        thumbnailUrl,
+        ...Object.keys(variantResults).length > 0 ? { variants: variantResults } : {}
+      });
     }
     const fileFields = {};
-    for (const res2 of uploadResults) {
-      if (res2.file) {
-        const fieldname = res2.file.fieldname;
-        if (!fileFields[fieldname]) fileFields[fieldname] = [];
-        fileFields[fieldname].push(res2.file);
+    for (const r of uploadResults) {
+      if (r.file) {
+        const fn = r.file.fieldname;
+        if (!fileFields[fn]) fileFields[fn] = [];
+        fileFields[fn].push(r.file);
       }
     }
     const payload = {
@@ -893,84 +2274,124 @@ var UploadEngine = class {
     }
     return payload;
   }
-  /**
-   * Build field validation rules from config + custom fields.
-   */
-  /**
-   * Cleanup utility to remove files from storage and database.
-   * Useful for error handling in the calling middleware.
-   */
+  // ── Chunk-to-disk assembly ────────────────────────────────────────────────
+  async assembleChunksToDisk(storage, fileId, totalChunks, ext, ctx) {
+    if (typeof storage.assembleChunksToPath === "function") {
+      return await storage.assembleChunksToPath(fileId, totalChunks, ext, ctx);
+    }
+    const chunks = [];
+    for (let i = 0; i < totalChunks; i++) {
+      const buf = await storage.readChunk(fileId, i, ctx);
+      chunks.push(ensureBuffer2(buf));
+    }
+    return await this.mediaProcessor.assembleChunksToDisk(chunks, ext);
+  }
+  // ── Media processing dispatch (path-based) ────────────────────────────────
+  shouldProcessMedia(mimetype, transformer, storage) {
+    if (storage?.hasNativeVariantSupport) {
+      console.log(`[UploadEngine] Skipping local media processing; natively supported by storage adapter '${storage.name}'`);
+      return false;
+    }
+    return !!(transformer && (mimetype.startsWith("image/") || mimetype.startsWith("video/") || mimetype.startsWith("audio/")));
+  }
+  async processMediaFromPath(inputPath, mimetype, filename, transformer) {
+    const mediaType = transformer.type ?? (mimetype.startsWith("video/") ? "video" : mimetype.startsWith("audio/") ? "audio" : mimetype.startsWith("image/") ? "image" : null);
+    if (!mediaType) return null;
+    const qualityConfigs = normaliseQualityConfigs(transformer);
+    if (mediaType === "video") {
+      const cfg = {
+        quality: normaliseQuality(transformer.quality),
+        qualityConfigs: qualityConfigs.length > 0 ? qualityConfigs : void 0,
+        format: normaliseFormat2(transformer.format) ?? "mp4",
+        startTime: transformer.startTime,
+        endTime: transformer.endTime,
+        mute: transformer.mute,
+        videoBitrate: transformer.videoBitrate,
+        audioBitrate: transformer.audioBitrate,
+        resolution: transformer.resolution,
+        codec: transformer.codec,
+        generateThumbnail: transformer.generateThumbnail !== false,
+        thumbnailTimeSeconds: transformer.thumbnailTimeSeconds
+      };
+      return await this.mediaProcessor.processVideoFromPath(inputPath, mimetype, filename, cfg);
+    }
+    if (mediaType === "audio") {
+      const cfg = {
+        quality: normaliseQuality(transformer.quality),
+        qualityConfigs: qualityConfigs.length > 0 ? qualityConfigs : void 0,
+        format: normaliseFormat2(transformer.format) ?? "mp3",
+        startTime: transformer.startTime,
+        endTime: transformer.endTime,
+        audioBitrate: transformer.audioBitrate
+      };
+      return await this.mediaProcessor.processAudioFromPath(inputPath, mimetype, filename, cfg);
+    }
+    if (mediaType === "image") {
+      const buffer = await fs2.promises.readFile(inputPath);
+      const cfg = {
+        quality: normaliseQuality(transformer.quality),
+        qualityConfigs: qualityConfigs.length > 0 ? qualityConfigs : void 0,
+        format: normaliseFormat2(transformer.format),
+        width: transformer.width,
+        height: transformer.height
+      };
+      const result = await this.mediaProcessor.processImage(buffer, mimetype, cfg);
+      return { ...result, cleanupFn: async () => {
+      } };
+    }
+    return null;
+  }
+  // ── Cleanup ───────────────────────────────────────────────────────────────
   async cleanup(files) {
     const fileArray = Array.isArray(files) ? files : [files];
-    if (fileArray.length === 0) return;
     for (const file of fileArray) {
       try {
         const storage = this.config.storages[file.storageProvider || this.config.defaultStorage];
-        if (storage) {
-          await storage.delete(file.storageRef);
-        }
-        if (this.config.database) {
-          await this.config.database.deleteFiles([file.id]);
-        }
+        if (storage) await storage.delete(file.storageRef);
+        if (this.config.database) await this.config.database.deleteFiles([file.id]);
       } catch (error) {
         console.error(`[UploadEngine] Cleanup failed for file ${file.id}:`, error);
       }
     }
   }
+  // ── Private helpers ───────────────────────────────────────────────────────
+  isChunkedUpload(fields) {
+    return !!(fields.sessionId && typeof fields.sessionId === "string" && fields.chunkIndex !== void 0 && !isNaN(parseInt(String(fields.chunkIndex))) && fields.totalChunks !== void 0 && !isNaN(parseInt(String(fields.totalChunks))));
+  }
   buildFieldValidation(typeConfig) {
-    const validation = {};
-    validation.sessionId = { minLength: 5 };
-    validation.chunkIndex = {};
-    validation.totalChunks = {};
-    validation.filename = { required: true, maxLength: 255 };
-    validation.mimetype = { required: true };
-    validation.uploadType = { required: true };
-    if (typeConfig.customFields) {
-      for (const [name, rule] of Object.entries(typeConfig.customFields)) {
-        validation[name] = rule;
-      }
-    }
-    return validation;
-  }
-  /**
-   * Build file validation rules from config.
-   */
-  buildFileValidation(typeConfig) {
-    const validation = {};
-    validation[".*"] = {
-      allowedMimePatterns: typeConfig.allowedKinds.map((kind) => {
-        if (kind === "image") return "image/*";
-        if (kind === "video") return "video/*";
-        if (kind === "audio") return "audio/*";
-        if (kind === "document") return "application/*|text/*";
-        return "*/*";
-      }),
-      maxSize: resolveSizeLimit(this.config, typeConfig, "unknown"),
-      detectMagicBytes: true
+    const v = {
+      sessionId: { minLength: 5 },
+      chunkIndex: {},
+      totalChunks: {},
+      filename: { required: true, maxLength: 255 },
+      mimetype: { required: true },
+      uploadType: { required: true }
     };
-    return validation;
-  }
-  /**
-   * Extract custom fields (non-standard) from parsed fields.
-   */
-  extractCustomFields(fields, exclude = []) {
-    const standardFields = [
-      "sessionId",
-      "chunkIndex",
-      "totalChunks",
-      "filename",
-      "mimetype",
-      "uploadType",
-      "fieldname",
-      ...exclude
-    ];
-    const custom = {};
-    for (const [key, value] of Object.entries(fields)) {
-      if (!standardFields.includes(key)) {
-        custom[key] = value;
-      }
+    if (typeConfig.customFields) {
+      for (const [name, rule] of Object.entries(typeConfig.customFields)) v[name] = rule;
     }
-    return custom;
+    return v;
+  }
+  buildFileValidation(typeConfig) {
+    return {
+      ".*": {
+        allowedMimePatterns: typeConfig.allowedKinds.map((kind) => {
+          if (kind === "image") return "image/*";
+          if (kind === "video") return "video/*";
+          if (kind === "audio") return "audio/*";
+          if (kind === "document") return "application/*|text/*";
+          return "*/*";
+        }),
+        maxSize: resolveSizeLimit(this.config, typeConfig, "unknown"),
+        detectMagicBytes: true
+      }
+    };
+  }
+  extractCustomFields(fields, exclude = []) {
+    const std = ["sessionId", "chunkIndex", "totalChunks", "filename", "mimetype", "uploadType", "fieldname", "transformer", ...exclude];
+    const out = {};
+    for (const [k, v] of Object.entries(fields)) if (!std.includes(k)) out[k] = v;
+    return out;
   }
   async handleError(error, uploadType, res) {
     const err = error instanceof Error ? error : new Error(String(error));
@@ -992,9 +2413,7 @@ var UploadEngine = class {
   }
   getContentType(req) {
     const ct = req.headers["content-type"];
-    if (typeof ct === "string") return ct;
-    if (Array.isArray(ct)) return ct[0] || "";
-    return "";
+    return typeof ct === "string" ? ct : Array.isArray(ct) ? ct[0] || "" : "";
   }
   getUploadType(req) {
     return req.query.uploadType || req.params.uploadType;
@@ -1009,6 +2428,95 @@ var UploadEngine = class {
     return `session_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
   }
 };
+function normaliseQuality(q) {
+  if (q === void 0) return void 0;
+  if (typeof q === "number") return q;
+  if (q === "high" || q === "medium" || q === "low") return q;
+  if (/^\d+p$/i.test(String(q))) return void 0;
+  const n = parseFloat(q);
+  return isNaN(n) ? "medium" : n;
+}
+var RESOLUTION_PATTERN = /^\d{3,4}p$/i;
+function normaliseQualityConfigs(transformer) {
+  const qc = transformer.qualityConfigs;
+  if (qc) {
+    let arr;
+    if (Array.isArray(qc) && qc.length > 0) {
+      arr = qc;
+    } else if (typeof qc === "object" && !Array.isArray(qc)) {
+      arr = Object.values(qc);
+    } else {
+      arr = [];
+    }
+    if (arr.length > 0) {
+      const seen = /* @__PURE__ */ new Set();
+      const deduped = arr.filter((cfg) => {
+        if (seen.has(cfg.id)) {
+          console.warn(`[UploadEngine] Duplicate quality config id "${cfg.id}" removed.`);
+          return false;
+        }
+        seen.add(cfg.id);
+        return true;
+      });
+      return deduped.map((cfg) => {
+        if (!cfg.resolution && RESOLUTION_PATTERN.test(cfg.id)) {
+          return { ...cfg, resolution: cfg.id.toLowerCase() };
+        }
+        return cfg;
+      });
+    }
+  }
+  if (Array.isArray(transformer.qualities) && transformer.qualities.length > 0) {
+    const seen = /* @__PURE__ */ new Set();
+    return transformer.qualities.map((q) => {
+      const raw = String(q).trim();
+      return {
+        id: raw,
+        label: raw,
+        ...RESOLUTION_PATTERN.test(raw) ? { resolution: raw.toLowerCase() } : { quality: raw }
+      };
+    }).filter((cfg) => {
+      if (seen.has(cfg.id)) {
+        console.warn(`[UploadEngine] Duplicate quality "${cfg.id}" in qualities[] removed.`);
+        return false;
+      }
+      seen.add(cfg.id);
+      return true;
+    });
+  }
+  return [];
+}
+function normaliseFormat2(fmt) {
+  if (!fmt) return void 0;
+  return fmt.replace(/^(video|audio|image)\//, "");
+}
+function buildVariantFilename(original, qualityId, extension) {
+  const dir = path2.dirname(original);
+  const base = path2.basename(original, path2.extname(original));
+  const name = `${base}_${qualityId}.${extension}`;
+  return dir === "." ? name : `${dir}/${name}`;
+}
+function replaceExtension(filename, newExt) {
+  const base = path2.basename(filename, path2.extname(filename));
+  const dir = path2.dirname(filename);
+  return dir === "." ? `${base}${newExt}` : `${dir}/${base}${newExt}`;
+}
+function inferExtFromMime(mime) {
+  if (mime.startsWith("video/")) {
+    if (mime.includes("webm")) return ".webm";
+    if (mime.includes("quicktime")) return ".mov";
+    return ".mp4";
+  }
+  if (mime.startsWith("audio/")) {
+    if (mime.includes("wav")) return ".wav";
+    if (mime.includes("ogg")) return ".ogg";
+    return ".mp3";
+  }
+  if (mime.includes("png")) return ".png";
+  if (mime.includes("webp")) return ".webp";
+  if (mime.includes("gif")) return ".gif";
+  return ".jpg";
+}
 
 // src/database/InMemoryRepository.ts
 var InMemoryRepository = class {
@@ -1302,7 +2810,21 @@ var MongooseRepository = class _MongooseRepository {
     if (this.hooks?.beforeCreateChunk) {
       chunkToStore = await this.hooks.beforeCreateChunk(chunk, ctx);
     }
-    await this.chunkModel.create(chunkToStore);
+    await this.chunkModel.findOneAndUpdate(
+      {
+        fileId: chunkToStore.fileId,
+        chunkNumber: chunkToStore.chunkNumber
+      },
+      {
+        $set: chunkToStore,
+        $setOnInsert: { createdAt: /* @__PURE__ */ new Date() }
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true
+      }
+    );
     if (this.hooks?.afterCreateChunk) {
       await this.hooks.afterCreateChunk(chunkToStore, ctx);
     }
@@ -1666,112 +3188,358 @@ var SQLRepository = class {
 };
 
 // src/adapters/storage/LocalDiskStorageAdapter.ts
-import { createReadStream, promises as fs } from "fs";
-import * as path from "path";
+import { createReadStream as createReadStream2, promises as fs3 } from "fs";
+import * as fsCb from "fs";
+import * as path3 from "path";
 var LocalDiskStorageAdapter = class {
   name = "local-disk";
   rootDir;
   publicBaseUrl;
-  openHandles = /* @__PURE__ */ new Map();
+  /** Remembers the StorageContext for each in-progress upload. */
+  fileCtx = /* @__PURE__ */ new Map();
   constructor(options) {
     this.rootDir = options.rootDir;
     this.publicBaseUrl = options.publicBaseUrl;
   }
+  // ── Path helpers ────────────────────────────────────────────────────────
   async ensureDir(dir) {
-    await fs.mkdir(dir, { recursive: true });
+    await fs3.mkdir(dir, { recursive: true });
   }
-  // ✅ FIXED: Include file extension
-  partPath(fileId, ctx) {
-    const ext = ctx.originalName ? path.extname(ctx.originalName) : "";
-    const filename = `${fileId}${ext}.part`;
-    return path.join(this.rootDir, ctx.bucket || "default", filename);
+  /**
+   * Path for an individual chunk file.
+   * Zero-padded index keeps OS directory listings in order.
+   */
+  chunkPath(fileId, chunkNumber, ctx) {
+    const idx = String(chunkNumber).padStart(6, "0");
+    return path3.join(
+      this.rootDir,
+      ctx.bucket || "default",
+      `${fileId}.chunk-${idx}`
+    );
   }
-  // ✅ FIXED: Include file extension
+  /** Path for the final assembled file. */
   finalPath(fileId, ctx) {
-    const ext = ctx.originalName ? path.extname(ctx.originalName) : "";
-    const filename = `${fileId}${ext}`;
-    return path.join(this.rootDir, ctx.bucket || "default", filename);
+    const ext = ctx.originalName ? path3.extname(ctx.originalName) : "";
+    return path3.join(this.rootDir, ctx.bucket || "default", `${fileId}${ext}`);
   }
+  /** Temporary assembled path used during media processing. */
+  assembledPath(fileId, ext, ctx) {
+    return path3.join(this.rootDir, ctx.bucket || "default", `${fileId}_assembled${ext}`);
+  }
+  // ── StorageAdapter implementation ───────────────────────────────────────
+  /**
+   * Write one chunk to its own file (FIX [1] + [2]).
+   * Writing is idempotent: retrying chunk N just overwrites the same file.
+   */
   async writeChunk(fileId, chunkNumber, data, ctx) {
-    const filePath = this.partPath(fileId, ctx);
-    let handle = this.openHandles.get(fileId);
-    if (!handle) {
-      await this.ensureDir(path.dirname(filePath));
-      handle = await fs.open(filePath, "w");
-      this.openHandles.set(fileId, handle);
-    }
-    await handle.appendFile(data);
+    const dest = this.chunkPath(fileId, chunkNumber, ctx);
+    await this.ensureDir(path3.dirname(dest));
+    await fs3.writeFile(dest, data);
+    this.fileCtx.set(fileId, ctx);
   }
+  /**
+   * Stream all chunk files to a single assembled file on disk (FIX [3]).
+   *
+   * UploadEngine.assembleChunksToDisk() calls this first. Because it
+   * exists on this adapter, the engine never falls through to the
+   * missing readChunk() fallback.
+   *
+   * Returns the path of the assembled file so FFmpeg (or the engine's
+   * single-quality path) can read directly from disk.
+   */
+  async assembleChunksToPath(fileId, totalChunks, ext, ctx) {
+    const resolvedCtx = ctx ?? this.fileCtx.get(fileId);
+    if (!resolvedCtx) {
+      throw new Error(`[LocalDisk] No StorageContext for fileId "${fileId}"`);
+    }
+    const dest = this.assembledPath(fileId, ext, resolvedCtx);
+    await this.ensureDir(path3.dirname(dest));
+    const writeStream = fsCb.createWriteStream(dest);
+    await new Promise((resolve, reject) => {
+      writeStream.on("error", reject);
+      writeStream.on("finish", resolve);
+      (async () => {
+        try {
+          for (let i = 0; i < totalChunks; i++) {
+            const chunkFile = this.chunkPath(fileId, i, resolvedCtx);
+            const buf = await fs3.readFile(chunkFile);
+            const ok = writeStream.write(buf);
+            if (!ok) await new Promise((r) => writeStream.once("drain", r));
+          }
+          writeStream.end();
+        } catch (err) {
+          writeStream.destroy(err);
+          reject(err);
+        }
+      })();
+    });
+    return dest;
+  }
+  /**
+   * Concatenate chunk files into the final stored file, then remove the
+   * chunk files (FIX [4]). Called by UploadEngine when no media
+   * processing transformer is provided.
+   */
   async finalize(fileId, ctx) {
-    const handle = this.openHandles.get(fileId);
-    if (handle) {
-      await handle.close();
-      this.openHandles.delete(fileId);
+    const resolvedCtx = ctx ?? this.fileCtx.get(fileId);
+    if (!resolvedCtx) {
+      throw new Error(`[LocalDisk] No StorageContext for fileId "${fileId}"`);
     }
-    const partPath = this.partPath(fileId, ctx);
-    const finalPath = this.finalPath(fileId, ctx);
-    await this.ensureDir(path.dirname(finalPath));
-    try {
-      await fs.rename(partPath, finalPath);
-    } catch (error) {
-      console.error(`Failed to finalize upload: ${partPath} \u2192 ${finalPath}`, error);
-      throw error;
-    }
-    const ref = path.relative(this.rootDir, finalPath);
+    const totalChunks = resolvedCtx.chunkCount;
+    const dest = this.finalPath(fileId, resolvedCtx);
+    await this.ensureDir(path3.dirname(dest));
+    const writeStream = fsCb.createWriteStream(dest);
+    await new Promise((resolve, reject) => {
+      writeStream.on("error", reject);
+      writeStream.on("finish", resolve);
+      (async () => {
+        try {
+          for (let i = 0; i < totalChunks; i++) {
+            const chunkFile = this.chunkPath(fileId, i, resolvedCtx);
+            const buf = await fs3.readFile(chunkFile);
+            const ok = writeStream.write(buf);
+            if (!ok) await new Promise((r) => writeStream.once("drain", r));
+            await fs3.unlink(chunkFile).catch(() => {
+            });
+          }
+          writeStream.end();
+        } catch (err) {
+          writeStream.destroy(err);
+          reject(err);
+        }
+      })();
+    });
+    this.fileCtx.delete(fileId);
+    const ref = path3.relative(this.rootDir, dest);
     return {
       storageRef: ref,
       url: this.publicBaseUrl ? `${this.publicBaseUrl.replace(/\/$/, "")}/${ref}` : void 0
     };
   }
+  // ── putStream ────────────────────────────────────────────────────────────
+  async putStream(fileId, stream, ctx) {
+    const dest = this.finalPath(fileId, ctx);
+    await this.ensureDir(path3.dirname(dest));
+    const writeStream = fsCb.createWriteStream(dest);
+    await new Promise((resolve, reject) => {
+      writeStream.on("error", reject);
+      writeStream.on("finish", resolve);
+      stream.pipe(writeStream);
+      stream.on("error", reject);
+    });
+    const ref = path3.relative(this.rootDir, dest);
+    return {
+      storageRef: ref,
+      url: this.publicBaseUrl ? `${this.publicBaseUrl.replace(/\/$/, "")}/${ref}` : void 0
+    };
+  }
+  /** Single-shot write for non-chunked uploads. */
   async putObject(fileId, data, ctx) {
-    const finalPath = this.finalPath(fileId, ctx);
-    await this.ensureDir(path.dirname(finalPath));
-    await fs.writeFile(finalPath, data);
-    const ref = path.relative(this.rootDir, finalPath);
+    const dest = this.finalPath(fileId, ctx);
+    await this.ensureDir(path3.dirname(dest));
+    await fs3.writeFile(dest, data);
+    const ref = path3.relative(this.rootDir, dest);
     return {
       storageRef: ref,
       url: this.publicBaseUrl ? `${this.publicBaseUrl.replace(/\/$/, "")}/${ref}` : void 0
     };
   }
   async readStream(ref, options) {
-    const fullPath = path.join(this.rootDir, ref);
-    return createReadStream(fullPath, {
+    return createReadStream2(path3.join(this.rootDir, ref), {
       start: options?.start,
       end: options?.end
     });
   }
   async delete(ref) {
-    const fullPath = path.join(this.rootDir, ref);
-    await fs.unlink(fullPath).catch(() => {
+    await fs3.unlink(path3.join(this.rootDir, ref)).catch(() => {
     });
   }
 };
 
 // src/adapters/storage/DatabaseStorageAdapter.ts
 import { Readable } from "stream";
+import * as os2 from "os";
+import * as path4 from "path";
+import * as fsCb2 from "fs";
+var DEFAULT_STREAM_CHUNK_SIZE = 4 * 1024 * 1024;
+function toBuffer(input) {
+  if (Buffer.isBuffer(input)) return input;
+  if (input instanceof ArrayBuffer) return Buffer.from(input);
+  if (input instanceof Uint8Array) return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  if (input && typeof input === "object") {
+    if (input.buffer && typeof input.buffer === "object") return Buffer.from(input.buffer);
+    if (input.data) return Buffer.from(input.data);
+    if (input.type === "Buffer" && Array.isArray(input.data)) return Buffer.from(input.data);
+  }
+  return Buffer.from(input);
+}
 var DatabaseStorageAdapter = class {
   name = "database";
   database;
   prefetchCount;
+  tempDir;
+  defaultStreamChunkSize;
   constructor(options) {
     if (!options.database.createChunk || !options.database.getChunk) {
       throw new Error(
-        "[DatabaseStorageAdapter] The provided MetadataRepository does not implement createChunk/getChunk \u2014 DatabaseStorageAdapter cannot be used with it."
+        "[DatabaseStorageAdapter] The provided MetadataRepository does not implement createChunk / getChunk \u2014 DatabaseStorageAdapter cannot be used with it."
       );
     }
     this.database = options.database;
     this.prefetchCount = options.prefetchCount ?? 2;
+    this.tempDir = options.tempDir ?? os2.tmpdir();
+    this.defaultStreamChunkSize = options.defaultStreamChunkSize ?? DEFAULT_STREAM_CHUNK_SIZE;
   }
-  async writeChunk(fileId, chunkNumber, data) {
-    await this.database.createChunk({ fileId, chunkNumber, data });
+  // ── Core chunk write (original upload path — unchanged) ─────────────────
+  async writeChunk(fileId, chunkNumber, data, ctx) {
+    const safe = toBuffer(data);
+    await this.database.createChunk({ fileId, chunkNumber, data: safe });
   }
-  async finalize(fileId) {
+  // ── assembleChunksToPath — streams chunk rows to a temp file on disk ────
+  async assembleChunksToPath(fileId, totalChunks, ext, ctx) {
+    const dest = path4.join(this.tempDir, `${fileId}_assembled${ext}`);
+    const writeStream = fsCb2.createWriteStream(dest);
+    await new Promise((resolve, reject) => {
+      writeStream.on("error", reject);
+      writeStream.on("finish", resolve);
+      (async () => {
+        try {
+          for (let i = 0; i < totalChunks; i++) {
+            const raw = await this.database.getChunk(fileId, i);
+            if (!raw) {
+              throw new Error(
+                `[DatabaseStorageAdapter] Missing chunk ${i} for file "${fileId}"`
+              );
+            }
+            const buf = toBuffer(raw);
+            const ok = writeStream.write(buf);
+            if (!ok) await new Promise((r) => writeStream.once("drain", r));
+          }
+          writeStream.end();
+        } catch (err) {
+          writeStream.destroy(err);
+          reject(err);
+        }
+      })();
+    });
+    return dest;
+  }
+  // ── finalize ──────────────────────────────────────────────────────────
+  async finalize(fileId, ctx) {
     return { storageRef: fileId };
   }
+  // ── Single-shot write (small files / fallback) ───────────────────────────
+  //
+  // Still used directly for things like thumbnails, which are always small
+  // (a few hundred KB JPEGs) and safely fit in one chunk document.
   async putObject(fileId, data, ctx) {
-    await this.database.createChunk({ fileId, chunkNumber: 0, data });
+    const safe = toBuffer(data);
+    if (safe.length > this.defaultStreamChunkSize) {
+      console.warn(
+        `[DatabaseStorageAdapter] putObject received ${safe.length} bytes for "${fileId}", exceeding the ${this.defaultStreamChunkSize} byte single-chunk safety threshold. Re-chunking in memory \u2014 prefer putStream() for large files.`
+      );
+      return this.writeBufferAsChunks(fileId, safe, this.resolveChunkSize(ctx));
+    }
+    await this.database.createChunk({ fileId, chunkNumber: 0, data: safe });
     return { storageRef: fileId };
   }
+  /** Shared chunking logic for the in-memory guard-rail path in putObject(). */
+  async writeBufferAsChunks(fileId, buffer, chunkSize) {
+    const chunkCount = Math.max(1, Math.ceil(buffer.length / chunkSize));
+    for (let i = 0; i < chunkCount; i++) {
+      const start = i * chunkSize;
+      const end = Math.min(start + chunkSize, buffer.length);
+      await this.database.createChunk({ fileId, chunkNumber: i, data: buffer.subarray(start, end) });
+    }
+    return { storageRef: fileId, chunkCount, chunkSize, totalSize: buffer.length };
+  }
+  // ── putStream — THE FIX ───────────────────────────────────────────────
+  //
+  // Reads `source` (e.g. fs.createReadStream(variantPath)) and writes it to
+  // the database as a sequence of fixed-size chunk documents, never holding
+  // more than ~chunkSize bytes in memory at once. This is what UploadEngine
+  // calls for every encoded variant (and the primary/raw file) regardless
+  // of size, so a 1.5GB 1080p variant is written the same way a 1.5GB
+  // original upload was received: in pieces.
+  //
+  // Chunk-size selection — per explicit requirement, this REUSES the
+  // ORIGINAL upload's chunkSize so the variant's chunk geometry matches the
+  // source file's, with the correct "last chunk is a remainder, not padded"
+  // behavior:
+  //   e.g. a 5MB file uploaded in 2MB pieces is [2MB, 2MB, 1MB] — three
+  //   chunks. If the encoded variant comes out to, say, 4.3MB, written with
+  //   the SAME 2MB chunkSize it becomes [2MB, 2MB, 0.3MB] — still three
+  //   chunks, last one sized to whatever is actually left. We do not pad,
+  //   and we do not assume the variant's total size lines up evenly with
+  //   chunkSize.
+  //
+  // ctx.chunkSize is expected to carry the original upload's chunk size
+  // (UploadEngine sets this on storageCtx from the chunked-upload fields).
+  // If absent (e.g. non-chunked single-shot upload), defaultStreamChunkSize
+  // is used instead.
+  async putStream(fileId, source, ctx) {
+    const chunkSize = this.resolveChunkSize(ctx);
+    let chunkNumber = 0;
+    let totalBytes = 0;
+    let pending = [];
+    let pendingLength = 0;
+    for await (const chunk of source) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      pending.push(buf);
+      pendingLength += buf.length;
+      while (pendingLength >= chunkSize) {
+        let collected = 0;
+        const pieces = [];
+        while (collected < chunkSize && pending.length > 0) {
+          const first = pending[0];
+          const needed = chunkSize - collected;
+          if (first.length <= needed) {
+            pieces.push(first);
+            collected += first.length;
+            pending.shift();
+            pendingLength -= first.length;
+          } else {
+            pieces.push(first.subarray(0, needed));
+            collected += needed;
+            pending[0] = first.subarray(needed);
+            pendingLength -= needed;
+          }
+        }
+        const piece = pieces.length === 1 ? pieces[0] : Buffer.concat(pieces, chunkSize);
+        await this.database.createChunk({ fileId, chunkNumber, data: Buffer.from(piece) });
+        chunkNumber += 1;
+        totalBytes += piece.length;
+      }
+    }
+    if (pendingLength > 0) {
+      const piece = pending.length === 1 ? pending[0] : Buffer.concat(pending, pendingLength);
+      await this.database.createChunk({ fileId, chunkNumber, data: Buffer.from(piece) });
+      chunkNumber += 1;
+      totalBytes += piece.length;
+    }
+    if (chunkNumber === 0) {
+      await this.database.createChunk({ fileId, chunkNumber: 0, data: Buffer.alloc(0) });
+      chunkNumber = 1;
+    }
+    return {
+      storageRef: fileId,
+      chunkCount: chunkNumber,
+      chunkSize,
+      totalSize: totalBytes
+    };
+  }
+  /**
+   * Resolve the chunk size to use for re-chunking an outgoing stream.
+   * Prefers the ORIGINAL upload's chunkSize (carried on StorageContext by
+   * UploadEngine) so a variant's on-disk chunk geometry matches the source
+   * file's. Falls back to defaultStreamChunkSize for non-chunked uploads.
+   */
+  resolveChunkSize(ctx) {
+    const inherited = ctx?.chunkSize;
+    if (typeof inherited === "number" && inherited > 0) return inherited;
+    return this.defaultStreamChunkSize;
+  }
+  // ── Streaming read (unchanged) ───────────────────────────────────────────
   async readStream(ref, options) {
     const file = await this.database.getFileById(ref);
     if (!file) {
@@ -1779,12 +3547,13 @@ var DatabaseStorageAdapter = class {
     }
     const startByte = options?.start ?? 0;
     const endByte = options?.end ?? file.size - 1;
-    const startChunk = Math.floor(startByte / file.chunkSize);
-    const endChunk = Math.floor(endByte / file.chunkSize);
+    const chunkSize = file.chunkSize || file.size;
+    const startChunk = chunkSize > 0 ? Math.floor(startByte / chunkSize) : 0;
+    const endChunk = chunkSize > 0 ? Math.floor(endByte / chunkSize) : 0;
     return new ChunkReadStream({
       database: this.database,
       fileId: ref,
-      chunkSize: file.chunkSize,
+      chunkSize,
       fileSize: file.size,
       startChunk,
       endChunk,
@@ -1809,8 +3578,10 @@ var ChunkReadStream = class extends Readable {
     this.opts = opts;
     this.current = opts.startChunk;
   }
-  fetchChunk(chunkNumber) {
-    return this.opts.database.getChunk(this.opts.fileId, chunkNumber);
+  async fetchChunk(chunkNumber) {
+    const chunk = await this.opts.database.getChunk(this.opts.fileId, chunkNumber);
+    if (!chunk) return null;
+    return toBuffer(chunk);
   }
   prefetchAhead() {
     for (let i = 1; i <= this.opts.prefetchCount; i++) {
@@ -1820,7 +3591,8 @@ var ChunkReadStream = class extends Readable {
     }
   }
   chunkActualSize(chunkNumber) {
-    const isLast = chunkNumber === Math.ceil(this.opts.fileSize / this.opts.chunkSize) - 1;
+    const totalChunks = Math.ceil(this.opts.fileSize / this.opts.chunkSize);
+    const isLast = chunkNumber === totalChunks - 1;
     if (!isLast) return this.opts.chunkSize;
     const remainder = this.opts.fileSize % this.opts.chunkSize;
     return remainder > 0 ? remainder : this.opts.chunkSize;
@@ -1833,10 +3605,12 @@ var ChunkReadStream = class extends Readable {
     }
     this.reading = true;
     try {
-      let buffer = this.prefetch.has(this.current) ? await this.prefetch.get(this.current) : await this.fetchChunk(this.current);
+      const buffer = this.prefetch.has(this.current) ? await this.prefetch.get(this.current) : await this.fetchChunk(this.current);
       this.prefetch.delete(this.current);
       if (!buffer) {
-        this.destroy(new Error(`Missing chunk ${this.current} for file ${this.opts.fileId}`));
+        this.destroy(
+          new Error(`Missing chunk ${this.current} for file ${this.opts.fileId}`)
+        );
         return;
       }
       const isFirst = this.current === Math.floor(this.opts.startByte / this.opts.chunkSize);
@@ -1845,7 +3619,8 @@ var ChunkReadStream = class extends Readable {
       let sliceStart = 0;
       let sliceEnd = Math.min(actualSize, buffer.length);
       if (isFirst) sliceStart = this.opts.startByte % this.opts.chunkSize;
-      if (isLast) sliceEnd = Math.min(sliceEnd, this.opts.endByte % this.opts.chunkSize + 1);
+      if (isLast)
+        sliceEnd = Math.min(sliceEnd, this.opts.endByte % this.opts.chunkSize + 1);
       this.push(buffer.subarray(sliceStart, sliceEnd));
       this.current += 1;
       this.reading = false;
@@ -1865,20 +3640,33 @@ var ChunkReadStream = class extends Readable {
 };
 
 // src/adapters/storage/S3StorageAdapter.ts
+import * as os3 from "os";
+import * as path5 from "path";
+import * as fsCb3 from "fs";
 var MIN_S3_PART_SIZE = 5 * 1024 * 1024;
 var S3StorageAdapter = class {
   name = "s3";
   options;
-  client;
+  _client;
+  minPartSize;
+  tempDir;
+  /** Active multipart uploads keyed by fileId. */
   uploads = /* @__PURE__ */ new Map();
+  /**
+   * FIX [1]: Parallel cache of the raw engine-chunks (before S3-part
+   * buffering) so assembleChunksToPath() can reconstruct the file
+   * without downloading from S3.
+   */
+  partCache = /* @__PURE__ */ new Map();
   constructor(options) {
     this.options = options;
     this.minPartSize = options.minPartSize ?? MIN_S3_PART_SIZE;
+    this.tempDir = options.tempDir ?? os3.tmpdir();
   }
-  minPartSize;
+  // ── SDK lazy-loader ──────────────────────────────────────────────────────
   async getClient() {
     if (this.options.client) return this.options.client;
-    if (this.client) return this.client;
+    if (this._client) return this._client;
     let S3Client;
     try {
       ({ S3Client } = __require("@aws-sdk/client-s3"));
@@ -1887,28 +3675,61 @@ var S3StorageAdapter = class {
         '[upload-media/server] S3StorageAdapter requires "@aws-sdk/client-s3". Install it with: npm install @aws-sdk/client-s3'
       );
     }
-    this.client = new S3Client({
+    this._client = new S3Client({
       region: this.options.region,
       credentials: this.options.credentials,
       endpoint: this.options.endpoint,
       forcePathStyle: this.options.forcePathStyle
     });
-    return this.client;
+    return this._client;
   }
+  async loadCommands() {
+    try {
+      return __require("@aws-sdk/client-s3");
+    } catch {
+      throw new Error(
+        '[upload-media/server] S3StorageAdapter requires "@aws-sdk/client-s3". Install it with: npm install @aws-sdk/client-s3'
+      );
+    }
+  }
+  // ── Key / URL builders ───────────────────────────────────────────────────
   buildKey(fileId, ctx) {
     if (this.options.buildKey) return this.options.buildKey(fileId, ctx);
     return `${ctx.bucket}/${fileId}`;
   }
   buildPublicUrl(key) {
-    if (this.options.buildPublicUrl) return this.options.buildPublicUrl(this.options.bucket, key);
+    if (this.options.buildPublicUrl) {
+      return this.options.buildPublicUrl(this.options.bucket, key);
+    }
     if (this.options.endpoint) {
       return `${this.options.endpoint.replace(/\/$/, "")}/${this.options.bucket}/${key}`;
     }
     return `https://${this.options.bucket}.s3.${this.options.region}.amazonaws.com/${key}`;
   }
+  // ── Part flusher ─────────────────────────────────────────────────────────
+  async flushPart(state, sdk, client, isFinal) {
+    if (state.bufferedBytes === 0) return;
+    const body = Buffer.concat(state.buffer, state.bufferedBytes);
+    state.buffer = [];
+    state.bufferedBytes = 0;
+    const result = await client.send(
+      new sdk.UploadPartCommand({
+        Bucket: this.options.bucket,
+        Key: state.key,
+        UploadId: state.uploadId,
+        PartNumber: state.partNumber,
+        Body: body
+      })
+    );
+    state.parts.push({ ETag: result.ETag, PartNumber: state.partNumber });
+    state.partNumber += 1;
+  }
+  // ── writeChunk ───────────────────────────────────────────────────────────
   async writeChunk(fileId, chunkNumber, data, ctx) {
     const sdk = await this.loadCommands();
     const client = await this.getClient();
+    if (!this.partCache.has(fileId)) this.partCache.set(fileId, []);
+    this.partCache.get(fileId)[chunkNumber] = data;
     let state = this.uploads.get(fileId);
     if (!state) {
       const key = this.buildKey(fileId, ctx);
@@ -1935,39 +3756,52 @@ var S3StorageAdapter = class {
       await this.flushPart(state, sdk, client, false);
     }
   }
-  async flushPart(state, sdk, client, isFinal) {
-    if (state.bufferedBytes === 0 && !isFinal) return;
-    if (state.bufferedBytes === 0 && isFinal && state.parts.length > 0) return;
-    const body = Buffer.concat(state.buffer, state.bufferedBytes);
-    state.buffer = [];
-    state.bufferedBytes = 0;
-    const result = await client.send(
-      new sdk.UploadPartCommand({
-        Bucket: this.options.bucket,
-        Key: state.key,
-        UploadId: state.uploadId,
-        PartNumber: state.partNumber,
-        Body: body
-      })
-    );
-    state.parts.push({ ETag: result.ETag, PartNumber: state.partNumber });
-    state.partNumber += 1;
-  }
-  async loadCommands() {
-    try {
-      return __require("@aws-sdk/client-s3");
-    } catch {
+  // ── assembleChunksToPath (FIX [1]) ───────────────────────────────────────
+  //
+  // Reads cached engine-chunks in order and writes them to a temp file.
+  // The multipart upload on S3 is left open; finalize() completes it.
+  async assembleChunksToPath(fileId, totalChunks, ext, ctx) {
+    const cache = this.partCache.get(fileId);
+    if (!cache || cache.length < totalChunks) {
       throw new Error(
-        '[upload-media/server] S3StorageAdapter requires "@aws-sdk/client-s3". Install it with: npm install @aws-sdk/client-s3'
+        `[S3StorageAdapter] Part cache incomplete for fileId "${fileId}" (have ${cache?.length ?? 0}, need ${totalChunks})`
       );
     }
+    const dest = path5.join(this.tempDir, `${fileId}_assembled${ext}`);
+    const writeStream = fsCb3.createWriteStream(dest);
+    await new Promise((resolve, reject) => {
+      writeStream.on("error", reject);
+      writeStream.on("finish", resolve);
+      (async () => {
+        try {
+          for (let i = 0; i < totalChunks; i++) {
+            const buf = cache[i];
+            if (!buf) {
+              throw new Error(
+                `[S3StorageAdapter] Missing cached chunk ${i} for file "${fileId}"`
+              );
+            }
+            const ok = writeStream.write(buf);
+            if (!ok) await new Promise((r) => writeStream.once("drain", r));
+          }
+          writeStream.end();
+        } catch (err) {
+          writeStream.destroy(err);
+          reject(err);
+        }
+      })();
+    });
+    return dest;
   }
+  // ── finalize (FIX [2]) ───────────────────────────────────────────────────
   async finalize(fileId, ctx) {
     const sdk = await this.loadCommands();
     const client = await this.getClient();
     const state = this.uploads.get(fileId);
     if (!state) {
-      throw new Error(`[S3StorageAdapter] No active multipart upload found for fileId "${fileId}"`);
+      throw new Error(
+        `[S3StorageAdapter] No active multipart upload found for fileId "${fileId}"`
+      );
     }
     await this.flushPart(state, sdk, client, true);
     await client.send(
@@ -1979,11 +3813,28 @@ var S3StorageAdapter = class {
       })
     );
     this.uploads.delete(fileId);
+    this.partCache.delete(fileId);
     return {
       storageRef: state.key,
       url: this.buildPublicUrl(state.key)
     };
   }
+  // ── putStream ────────────────────────────────────────────────────────────
+  async putStream(fileId, stream, ctx) {
+    const sdk = await this.loadCommands();
+    const client = await this.getClient();
+    const key = this.buildKey(fileId, ctx);
+    await client.send(
+      new sdk.PutObjectCommand({
+        Bucket: this.options.bucket,
+        Key: key,
+        Body: stream,
+        ContentType: ctx.contentType
+      })
+    );
+    return { storageRef: key, url: this.buildPublicUrl(key) };
+  }
+  // ── putObject ────────────────────────────────────────────────────────────
   async putObject(fileId, data, ctx) {
     const sdk = await this.loadCommands();
     const client = await this.getClient();
@@ -1998,6 +3849,7 @@ var S3StorageAdapter = class {
     );
     return { storageRef: key, url: this.buildPublicUrl(key) };
   }
+  // ── readStream ───────────────────────────────────────────────────────────
   async readStream(ref, options) {
     const sdk = await this.loadCommands();
     const client = await this.getClient();
@@ -2011,27 +3863,43 @@ var S3StorageAdapter = class {
     );
     return result.Body;
   }
+  // ── delete ───────────────────────────────────────────────────────────────
   async delete(ref) {
     const sdk = await this.loadCommands();
     const client = await this.getClient();
-    await client.send(new sdk.DeleteObjectCommand({ Bucket: this.options.bucket, Key: ref }));
+    await client.send(
+      new sdk.DeleteObjectCommand({ Bucket: this.options.bucket, Key: ref })
+    );
   }
 };
 
 // src/adapters/storage/CloudinaryStorageAdapter.ts
+import * as os4 from "os";
+import * as path6 from "path";
+import * as fsCb4 from "fs";
 var CloudinaryStorageAdapter = class {
   name = "cloudinary";
+  hasNativeVariantSupport = true;
   options;
-  cloudinary;
+  _cloudinary;
+  tempDir;
+  /** Active upload_large_stream sessions keyed by fileId. */
   pending = /* @__PURE__ */ new Map();
+  /**
+   * FIX [1]: Raw engine-chunks cached so assembleChunksToPath() can
+   * reconstruct the file without re-downloading from Cloudinary.
+   */
+  chunkCache = /* @__PURE__ */ new Map();
   constructor(options) {
     this.options = options;
+    this.tempDir = options.tempDir ?? os4.tmpdir();
   }
+  // ── SDK lazy-loader ──────────────────────────────────────────────────────
   getSdk() {
-    if (this.cloudinary) return this.cloudinary;
+    if (this._cloudinary) return this._cloudinary;
     if (this.options.cloudinary) {
-      this.cloudinary = this.options.cloudinary;
-      return this.cloudinary;
+      this._cloudinary = this.options.cloudinary;
+      return this._cloudinary;
     }
     let cloudinary;
     try {
@@ -2047,9 +3915,10 @@ var CloudinaryStorageAdapter = class {
       api_secret: this.options.apiSecret,
       secure: true
     });
-    this.cloudinary = cloudinary;
+    this._cloudinary = cloudinary;
     return cloudinary;
   }
+  // ── Helpers ──────────────────────────────────────────────────────────────
   resourceTypeFor(contentType) {
     if (contentType.startsWith("image/")) return "image";
     if (contentType.startsWith("video/") || contentType.startsWith("audio/")) return "video";
@@ -2061,15 +3930,15 @@ var CloudinaryStorageAdapter = class {
     return `${folder}/${fileId}`;
   }
   getOrCreateUpload(fileId, ctx) {
-    let entry = this.pending.get(fileId);
-    if (entry) return entry;
+    const existing = this.pending.get(fileId);
+    if (existing) return existing;
     const cloudinary = this.getSdk();
     const publicId = this.buildPublicId(fileId, ctx);
     let resolveDone;
     let rejectDone;
-    const done = new Promise((resolve, reject) => {
-      resolveDone = resolve;
-      rejectDone = reject;
+    const done = new Promise((res, rej) => {
+      resolveDone = res;
+      rejectDone = rej;
     });
     const stream = cloudinary.uploader.upload_large_stream(
       {
@@ -2078,37 +3947,118 @@ var CloudinaryStorageAdapter = class {
         use_filename: true,
         unique_filename: false,
         chunk_size: 6 * 1024 * 1024
-        // Cloudinary's internal chunking granularity
       },
       (error, result) => {
         if (error) rejectDone(error);
         else resolveDone(result);
       }
     );
-    entry = { stream, done };
+    const entry = { stream, done };
     this.pending.set(fileId, entry);
     return entry;
   }
+  // ── writeChunk ───────────────────────────────────────────────────────────
   async writeChunk(fileId, chunkNumber, data, ctx) {
+    if (!this.chunkCache.has(fileId)) this.chunkCache.set(fileId, []);
+    this.chunkCache.get(fileId)[chunkNumber] = data;
     const { stream } = this.getOrCreateUpload(fileId, ctx);
-    const canContinue = stream.write(data);
-    if (!canContinue) {
-      await new Promise((resolve) => stream.once("drain", resolve));
-    }
+    const ok = stream.write(data);
+    if (!ok) await new Promise((r) => stream.once("drain", r));
   }
-  async finalize(fileId) {
+  // ── assembleChunksToPath (FIX [1]) ───────────────────────────────────────
+  //
+  // Drains the chunkCache to a temp file in order. The in-progress
+  // upload_large_stream is aborted here because the engine will
+  // re-upload the processed file via putObject/putStream.
+  async assembleChunksToPath(fileId, totalChunks, ext, ctx) {
+    const cache = this.chunkCache.get(fileId);
+    if (!cache || cache.length < totalChunks) {
+      throw new Error(
+        `[CloudinaryStorageAdapter] Chunk cache incomplete for fileId "${fileId}" (have ${cache?.length ?? 0}, need ${totalChunks})`
+      );
+    }
+    const dest = path6.join(this.tempDir, `${fileId}_assembled${ext}`);
+    const writeStream = fsCb4.createWriteStream(dest);
+    await new Promise((resolve, reject) => {
+      writeStream.on("error", reject);
+      writeStream.on("finish", resolve);
+      (async () => {
+        try {
+          for (let i = 0; i < totalChunks; i++) {
+            const buf = cache[i];
+            if (!buf) {
+              throw new Error(
+                `[CloudinaryStorageAdapter] Missing cached chunk ${i} for file "${fileId}"`
+              );
+            }
+            const ok = writeStream.write(buf);
+            if (!ok) await new Promise((r) => writeStream.once("drain", r));
+          }
+          writeStream.end();
+        } catch (err) {
+          writeStream.destroy(err);
+          reject(err);
+        }
+      })();
+    });
+    this._abortPending(fileId);
+    return dest;
+  }
+  /** Destroy the pending upload_large_stream without completing it. */
+  _abortPending(fileId) {
+    const entry = this.pending.get(fileId);
+    if (entry) {
+      try {
+        entry.stream.destroy();
+      } catch {
+      }
+      this.pending.delete(fileId);
+    }
+    this.chunkCache.delete(fileId);
+  }
+  // ── finalize (FIX [2]) ───────────────────────────────────────────────────
+  //
+  // Called by UploadEngine when NO media processing is configured.
+  // Ends the upload_large_stream and waits for Cloudinary's confirmation.
+  async finalize(fileId, ctx) {
     const entry = this.pending.get(fileId);
     if (!entry) {
-      throw new Error(`[CloudinaryStorageAdapter] No active upload found for fileId "${fileId}"`);
+      throw new Error(
+        `[CloudinaryStorageAdapter] No active upload stream for fileId "${fileId}". If media processing is enabled, the engine re-uploads via putObject \u2014 do not call finalize() manually in that case.`
+      );
     }
     entry.stream.end();
     const result = await entry.done;
     this.pending.delete(fileId);
+    this.chunkCache.delete(fileId);
     return {
       storageRef: result.public_id,
       url: result.secure_url
     };
   }
+  // ── putStream (FIX [4]) ──────────────────────────────────────────────────
+  //
+  // Called by UploadEngine.streamFileToStorage() for large processed files.
+  // Pipes a readable stream directly into Cloudinary's upload_stream.
+  async putStream(fileId, stream, ctx) {
+    const cloudinary = this.getSdk();
+    const publicId = this.buildPublicId(fileId, ctx);
+    const result = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          public_id: publicId,
+          resource_type: this.resourceTypeFor(ctx.contentType),
+          use_filename: true,
+          unique_filename: false
+        },
+        (error, res) => error ? reject(error) : resolve(res)
+      );
+      stream.pipe(uploadStream);
+      stream.on("error", reject);
+    });
+    return { storageRef: result.public_id, url: result.secure_url };
+  }
+  // ── putObject ────────────────────────────────────────────────────────────
   async putObject(fileId, data, ctx) {
     const cloudinary = this.getSdk();
     const publicId = this.buildPublicId(fileId, ctx);
@@ -2126,7 +4076,8 @@ var CloudinaryStorageAdapter = class {
     });
     return { storageRef: result.public_id, url: result.secure_url };
   }
-  async readStream(ref) {
+  // ── readStream ───────────────────────────────────────────────────────────
+  async readStream(ref, _options) {
     const cloudinary = this.getSdk();
     const https = __require("https");
     const signedUrl = cloudinary.url(ref, { secure: true, resource_type: "auto" });
@@ -2134,6 +4085,7 @@ var CloudinaryStorageAdapter = class {
       https.get(signedUrl, (response) => resolve(response)).on("error", reject);
     });
   }
+  // ── delete ───────────────────────────────────────────────────────────────
   async delete(ref) {
     const cloudinary = this.getSdk();
     await cloudinary.uploader.destroy(ref, { resource_type: "auto" });
@@ -2141,9 +4093,9 @@ var CloudinaryStorageAdapter = class {
 };
 
 // src/core/FileServingHandler.ts
-import { createReadStream as createReadStream2 } from "fs";
-import { promises as fs2 } from "fs";
-import * as path2 from "path";
+import { createReadStream as createReadStream3 } from "fs";
+import { promises as fs4 } from "fs";
+import * as path7 from "path";
 import { Readable as Readable2 } from "stream";
 var FALLBACK_MIME_TYPES = {
   ".txt": "text/plain",
@@ -2213,12 +4165,12 @@ var FileServingHandler = class {
     }
     let fullPath;
     if (ref.includes("/") || ref.includes("\\")) {
-      fullPath = path2.join(this.rootDir, ref);
+      fullPath = path7.join(this.rootDir, ref);
     } else {
       const uploadType = file?.uploadType || "avatar";
-      fullPath = path2.join(this.rootDir, uploadType, ref);
+      fullPath = path7.join(this.rootDir, uploadType, ref);
       if (!await this.fileExists(fullPath)) {
-        fullPath = path2.join(this.rootDir, ref);
+        fullPath = path7.join(this.rootDir, ref);
       }
     }
     if (!fullPath.startsWith(this.rootDir)) {
@@ -2227,19 +4179,19 @@ var FileServingHandler = class {
       return;
     }
     try {
-      const stat = await fs2.stat(fullPath);
+      const stat = await fs4.stat(fullPath);
       const mimeType = file?.contentType || this.getMimeTypeFromExtension(fullPath);
       this.setHeaders(res, mimeType, stat.size, stat.ino, stat.mtime);
       if (start !== void 0 && end !== void 0) {
         res.status(206);
         res.header("Content-Range", `bytes ${start}-${end}/${stat.size}`);
         res.header("Content-Length", String(end - start + 1));
-        const stream = createReadStream2(fullPath, { start, end });
+        const stream = createReadStream3(fullPath, { start, end });
         await res.pipeFrom(stream);
       } else {
         res.status(200);
         res.header("Content-Length", String(stat.size));
-        const stream = createReadStream2(fullPath);
+        const stream = createReadStream3(fullPath);
         await res.pipeFrom(stream);
       }
     } catch (err) {
@@ -2253,7 +4205,7 @@ var FileServingHandler = class {
   }
   async fileExists(filePath) {
     try {
-      await fs2.access(filePath);
+      await fs4.access(filePath);
       return true;
     } catch {
       return false;
@@ -2365,7 +4317,7 @@ var FileServingHandler = class {
     return filename || ref;
   }
   getMimeTypeFromExtension(fullPath) {
-    const ext = path2.extname(fullPath).toLowerCase();
+    const ext = path7.extname(fullPath).toLowerCase();
     if (FALLBACK_MIME_TYPES[ext]) {
       return FALLBACK_MIME_TYPES[ext];
     }
@@ -2415,11 +4367,7 @@ var OptimizedDatabaseMediaStream = class extends Readable2 {
   prefetchInProgress = false;
   database;
   constructor(database, fileId, startChunk, endChunk, fileChunkSize, startOffset, endOffset, fileSize) {
-    super({
-      highWaterMark: 1024 * 1024,
-      objectMode: false,
-      autoDestroy: true
-    });
+    super({ highWaterMark: 1024 * 1024, objectMode: false, autoDestroy: true });
     this.database = database;
     this.fileId = fileId;
     this.currentChunk = startChunk;
@@ -2430,58 +4378,33 @@ var OptimizedDatabaseMediaStream = class extends Readable2 {
     this.fileSize = fileSize;
     this.totalChunks = Math.ceil(fileSize / fileChunkSize);
   }
-  /**
-   * Calculate the actual size of a chunk based on file size and chunk size
-   * This is the CORRECT way to calculate chunk sizes
-   */
-  getChunkActualSize(chunkNumber) {
-    const isLastChunk = chunkNumber === this.totalChunks - 1;
-    if (isLastChunk) {
-      const remainder = this.fileSize % this.fileChunkSize;
-      return remainder > 0 ? remainder : this.fileChunkSize;
-    }
-    return this.fileChunkSize;
-  }
-  /**
-   * Get the starting byte of a chunk
-   */
+  /** Starting byte of a given chunk in the logical file */
   getChunkStartByte(chunkNumber) {
     return chunkNumber * this.fileChunkSize;
   }
   async fetchChunk(chunkNumber) {
     try {
-      const chunkData = await this.database.getChunk(this.fileId, chunkNumber);
-      if (!chunkData) {
+      const raw = await this.database.getChunk(this.fileId, chunkNumber);
+      if (!raw) {
         console.warn(`\u26A0\uFE0F Missing chunk ${chunkNumber} for file ${this.fileId}`);
         return null;
       }
-      const buffer = this.normalizeBuffer(chunkData);
+      const buffer = this.normalizeBuffer(raw);
       if (!buffer || buffer.length === 0) {
-        console.warn(`\u26A0\uFE0F Chunk ${chunkNumber} is empty or invalid`);
+        console.warn(`\u26A0\uFE0F Chunk ${chunkNumber} is empty or unreadable`);
         return null;
       }
-      const expectedSize = this.getChunkActualSize(chunkNumber);
-      if (buffer.length !== expectedSize) {
-        console.warn(`\u26A0\uFE0F Chunk ${chunkNumber}: expected ${expectedSize} bytes, got ${buffer.length} bytes`);
-      }
-      return {
-        buffer,
-        chunkNumber
-      };
-    } catch (error) {
-      console.error(`Error fetching chunk ${chunkNumber}:`, error);
+      return { buffer, chunkNumber };
+    } catch (err) {
+      console.error(`Error fetching chunk ${chunkNumber}:`, err);
       return null;
     }
   }
   normalizeBuffer(input) {
     if (!input) return null;
-    if (Buffer.isBuffer(input)) {
-      return input;
-    }
+    if (Buffer.isBuffer(input)) return input;
     if (input && typeof input === "object" && input._bsontype === "Binary") {
-      if (input.buffer) {
-        return Buffer.isBuffer(input.buffer) ? input.buffer : Buffer.from(input.buffer);
-      }
+      if (input.buffer) return Buffer.isBuffer(input.buffer) ? input.buffer : Buffer.from(input.buffer);
       try {
         return Buffer.from(input);
       } catch {
@@ -2489,62 +4412,39 @@ var OptimizedDatabaseMediaStream = class extends Readable2 {
       }
     }
     if (input && typeof input === "object" && input.buffer) {
-      if (Buffer.isBuffer(input.buffer)) {
-        return input.buffer;
-      }
-      if (ArrayBuffer.isView(input.buffer)) {
-        return Buffer.from(input.buffer.buffer, input.buffer.byteOffset, input.buffer.byteLength);
-      }
-      if (input.buffer instanceof ArrayBuffer) {
-        return Buffer.from(input.buffer);
-      }
+      if (Buffer.isBuffer(input.buffer)) return input.buffer;
+      if (ArrayBuffer.isView(input.buffer)) return Buffer.from(input.buffer.buffer, input.buffer.byteOffset, input.buffer.byteLength);
+      if (input.buffer instanceof ArrayBuffer) return Buffer.from(input.buffer);
       try {
         return Buffer.from(input.buffer);
       } catch {
       }
     }
-    if (ArrayBuffer.isView(input)) {
-      return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
-    }
-    if (typeof input === "string") {
-      return Buffer.from(input, "utf-8");
-    }
+    if (ArrayBuffer.isView(input)) return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+    if (typeof input === "string") return Buffer.from(input, "utf-8");
     try {
-      const converted = Buffer.from(input);
-      return converted && converted.length > 0 ? converted : null;
+      const c = Buffer.from(input);
+      return c.length > 0 ? c : null;
     } catch {
       return null;
     }
   }
   prefetchChunks() {
-    if (this.prefetchInProgress || this.destroyed) {
-      return;
-    }
+    if (this.prefetchInProgress || this.destroyed) return;
     this.prefetchInProgress = true;
     for (let i = 1; i <= PREFETCH_COUNT; i++) {
-      const prefetchChunkNum = this.currentChunk + i;
-      if (prefetchChunkNum > this.endChunk) {
-        break;
-      }
-      if (this.prefetchQueue.has(prefetchChunkNum)) {
-        continue;
-      }
-      const prefetchPromise = this.fetchChunk(prefetchChunkNum);
-      this.prefetchQueue.set(prefetchChunkNum, prefetchPromise);
-      prefetchPromise.finally(() => {
-        setTimeout(() => {
-          if (this.prefetchQueue.has(prefetchChunkNum)) {
-            this.prefetchQueue.delete(prefetchChunkNum);
-          }
-        }, 2e3);
+      const n = this.currentChunk + i;
+      if (n > this.endChunk || this.prefetchQueue.has(n)) continue;
+      const p = this.fetchChunk(n);
+      this.prefetchQueue.set(n, p);
+      p.finally(() => {
+        setTimeout(() => this.prefetchQueue.delete(n), 2e3);
       });
     }
     this.prefetchInProgress = false;
   }
   async _read() {
-    if (this.destroyed || this.isReading) {
-      return;
-    }
+    if (this.destroyed || this.isReading) return;
     if (this.currentChunk > this.endChunk) {
       this.push(null);
       this.cleanup();
@@ -2552,7 +4452,7 @@ var OptimizedDatabaseMediaStream = class extends Readable2 {
     }
     this.isReading = true;
     try {
-      let chunkData = null;
+      let chunkData;
       if (this.prefetchQueue.has(this.currentChunk)) {
         chunkData = await this.prefetchQueue.get(this.currentChunk);
         this.prefetchQueue.delete(this.currentChunk);
@@ -2565,23 +4465,23 @@ var OptimizedDatabaseMediaStream = class extends Readable2 {
         return;
       }
       if (this.destroyed) {
-        chunkData = null;
         this.isReading = false;
         return;
       }
+      const bufLen = chunkData.buffer.length;
       const chunkStartByte = this.getChunkStartByte(this.currentChunk);
-      const actualChunkSize = this.getChunkActualSize(this.currentChunk);
       let sliceStart = 0;
-      let sliceEnd = actualChunkSize;
-      if (this.currentChunk === Math.floor(this.startOffset / this.fileChunkSize)) {
+      let sliceEnd = bufLen;
+      const rangeStartChunk = Math.floor(this.startOffset / this.fileChunkSize);
+      if (this.currentChunk === rangeStartChunk) {
         sliceStart = this.startOffset - chunkStartByte;
       }
-      if (this.currentChunk === Math.floor(this.endOffset / this.fileChunkSize)) {
-        const endInChunk = this.endOffset - chunkStartByte;
-        sliceEnd = endInChunk + 1;
+      const rangeEndChunk = Math.floor(this.endOffset / this.fileChunkSize);
+      if (this.currentChunk === rangeEndChunk) {
+        sliceEnd = Math.min(bufLen, this.endOffset - chunkStartByte + 1);
       }
-      sliceStart = Math.max(0, Math.min(sliceStart, chunkData.buffer.length));
-      sliceEnd = Math.max(0, Math.min(sliceEnd, chunkData.buffer.length));
+      sliceStart = Math.max(0, Math.min(sliceStart, bufLen));
+      sliceEnd = Math.max(0, Math.min(sliceEnd, bufLen));
       if (sliceStart >= sliceEnd) {
         this.currentChunk++;
         this.isReading = false;
@@ -2593,24 +4493,15 @@ var OptimizedDatabaseMediaStream = class extends Readable2 {
       chunkData = null;
       this.currentChunk++;
       this.isReading = false;
-      if (!this.destroyed && this.currentChunk <= this.endChunk) {
-        this.prefetchChunks();
-      }
-      if (canPush && this.currentChunk <= this.endChunk && !this.destroyed) {
-        setImmediate(() => this._read());
-      }
-    } catch (error) {
+      if (!this.destroyed && this.currentChunk <= this.endChunk) this.prefetchChunks();
+      if (canPush && this.currentChunk <= this.endChunk && !this.destroyed) setImmediate(() => this._read());
+    } catch (err) {
       this.isReading = false;
-      if (!this.destroyed) {
-        this.destroy(error);
-      }
+      if (!this.destroyed) this.destroy(err);
     }
   }
   cleanup() {
-    if (this.prefetchQueue.size > 0) {
-      this.prefetchQueue.clear();
-    }
-    this.prefetchQueue = /* @__PURE__ */ new Map();
+    this.prefetchQueue.clear();
   }
   _destroy(error, callback) {
     this.destroyed = true;
@@ -3039,8 +4930,8 @@ function createHonoFileServingMiddleware(config, legacyOptions) {
 }
 
 // src/adapters/frameworks/H3Adapter.ts
-import path3 from "path";
-import fs3 from "fs/promises";
+import path8 from "path";
+import fs5 from "fs/promises";
 var setResponseStatus = (event, code) => {
   event.node.res.statusCode = code;
 };
@@ -3201,12 +5092,12 @@ var CreateH3FileServingHandler = class {
   database;
   cacheMaxAge;
   async serveFile(ref, event) {
-    const fullPath = path3.resolve(
+    const fullPath = path8.resolve(
       this.rootDir,
       ref
     );
     if (!fullPath.startsWith(
-      path3.resolve(
+      path8.resolve(
         this.rootDir
       )
     )) {
@@ -3216,7 +5107,7 @@ var CreateH3FileServingHandler = class {
       });
     }
     try {
-      const stat = await fs3.stat(
+      const stat = await fs5.stat(
         fullPath
       );
       if (!stat.isFile()) {
@@ -3244,7 +5135,7 @@ var CreateH3FileServingHandler = class {
           );
         }
       }
-      const fileBuffer = await fs3.readFile(
+      const fileBuffer = await fs5.readFile(
         fullPath
       );
       setHeader(
@@ -3280,7 +5171,7 @@ var CreateH3FileServingHandler = class {
     }
   }
   extractFileId(ref) {
-    return path3.basename(ref).replace(
+    return path8.basename(ref).replace(
       /\.[^/.]+$/,
       ""
     );
@@ -4048,5 +5939,6 @@ export {
   resolveStorageKey,
   resolveUploadConfig,
   signData,
+  toBuffer,
   verifySignature
 };

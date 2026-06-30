@@ -1,6 +1,5 @@
-/**
- * @upload-media/client - Type Definitions
- */
+
+// ─── Upload status ───────────────────────────────────────────────────────────
 
 export type UploadStatus =
   | 'pending'
@@ -10,62 +9,55 @@ export type UploadStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
-  | 'modifying'
-  | 'generating_thumbnail'
+  | 'processing' // server-side processing
   | 'error';
 
-export interface UploadOptions {
-  /** Upload endpoint URL */
-  endpoint: string;
+// ─── Quality ─────────────────────────────────────────────────────────────────
 
-  /** HTTP method (POST or PATCH) */
-  method: 'POST' | 'PATCH';
+export type Quality = 'high' | 'medium' | 'low' | number;
 
-  /** Video/Image quality ('high', 'medium', 'low') */
-  quality?: 'high' | 'medium' | 'low';
-
-  /** Maximum number of files allowed */
-  maxFiles?: number;
-
-  /** Number of concurrent uploads */
-  concurrentUploads?: number;
-
-  /** Upload priority */
-  priority?: 'high' | 'normal' | 'low';
-
-  /** Whether to transform/process media */
-  transform?: boolean;
-
-  /** Custom upload ID */
-  uploadId?: string;
-
-  /** Additional form data to send */
-  postData?: Record<string, any>;
-
-  /** Request metadata */
-  metadata?: Record<string, any>[];
-
-  /** Video start time (for trimming) */
-  videoStartTime?: number | string;
-
-  /** Video end time (for trimming) */
-  videoEndTime?: number | string;
-
-  /** Video duration */
-  duration?: string;
-
-  /** Media transformation options */
-  transformer?: {
-    /** 0-100 quality for images, or specific quality type */
-    quality?: number | 'high' | 'medium' | 'low';
-    /** List of qualities to generate (multi-output) */
-    qualities?: (number | 'high' | 'medium' | 'low')[];
-    /** Auto-transform based on network or config */
-    auto?: boolean;
-    /** Output format if applicable */
-    format?: string;
-  };
+export interface QualityConfig {
+  id: string;
+  label: string;
+  quality?: Quality;
+  resolution?: string;
+  videoBitrate?: string;
+  audioBitrate?: string;
+  width?: number;
+  height?: number;
+  codec?: string;
+  maxDimension?: number;
+  format?: string;
+  [key: string]: any;
 }
+
+// ─── Transformer config sent to backend ──────────────────────────────────────
+
+export interface TransformerConfig {
+  type?: 'image' | 'video' | 'audio';
+  quality?: Quality;
+  format?: string;
+  qualityConfigs?: QualityConfig[];
+  qualities?: string[];
+  // Video/Audio trimming
+  startTime?: number;
+  endTime?: number;
+  // Video specific
+  mute?: boolean;
+  videoBitrate?: string;
+  resolution?: string;
+  codec?: string;
+  generateThumbnail?: boolean;
+  thumbnailTimeSeconds?: number;
+  // Audio specific
+  audioBitrate?: string;
+  // Image specific
+  width?: number;
+  height?: number;
+  [key: string]: any;
+}
+
+// ─── Upload primitives ────────────────────────────────────────────────────────
 
 export interface FileUploadItem {
   fileIndex: number;
@@ -78,15 +70,16 @@ export interface FileUploadItem {
   status: UploadStatus;
   error?: string;
   sessionId?: string;
-  needsModification?: boolean;
-  isModified?: boolean;
-  modificationProgress?: number;
-  startTime?: number;
-  endTime?: number | null;
-  isMuted?: boolean;
-  videoDuration?: number | null;
-  needsTransformation?: boolean;
-  isTransformed?: boolean;
+  // Server-side processing info
+  isProcessing?: boolean;
+  processingProgress?: number;
+  processedSize?: number;
+}
+
+export interface FileMetadata {
+  size?: number;
+  type?: string;
+  fieldname?: string;
 }
 
 export interface UploadProgress {
@@ -102,8 +95,6 @@ export interface UploadProgress {
   error?: string;
   retryCount: number;
   maxRetries: number;
-
-  // Persistent Storage / Store fields
   allFilesSessionId?: string[];
   fileName?: string;
   fileSize?: number;
@@ -112,14 +103,33 @@ export interface UploadProgress {
   endpoint?: string;
   method?: string;
   postData?: Record<string, any>;
-  metadata?: any[];
-  modificationConfigs?: any[];
-  videoStartTime?: string;
-  videoEndTime?: string;
-  duration?: string;
-  currentModifyingIndex?: number;
+  metadata?: Array<FileMetadata>;
   uploadType?: string;
 }
+
+export interface UploadOptions {
+  endpoint: string;
+  method: 'POST' | 'PATCH';
+  maxFiles?: number;
+  concurrentUploads?: number;
+  priority?: 'high' | 'normal' | 'low';
+  uploadId?: string;
+  postData?: Record<string, any>;
+  uploadType?: string;
+  metadata?: Array<FileMetadata>;
+  // Server-side transformation config
+  transformer?: TransformerConfig;
+}
+
+export interface UpdateProgressParams {
+  progress: number;
+  status?: UploadStatus;
+  error?: string;
+  speed?: number;
+  timeRemaining?: number;
+}
+
+// ─── Worker messages ──────────────────────────────────────────────────────────
 
 export interface WorkerMessage {
   type: string;
@@ -131,7 +141,6 @@ export interface WorkerMessage {
   progress?: string;
   overallProgress?: string;
   fileProgress?: string;
-  chunkProgress?: string;
   status?: UploadStatus;
   message?: string;
   error?: string;
@@ -140,29 +149,8 @@ export interface WorkerMessage {
   canResume?: boolean;
   clearType?: 'all' | 'completed' | 'failed' | 'single';
   uploadIds?: string[];
-  modifiedBlob?: Blob;
-  blob?: Blob;
-  config?: any;
   requestId?: string;
   [key: string]: any;
-}
-
-export interface UpdateProgressParams {
-  progress: number;
-  status?: UploadStatus;
-  error?: string;
-  speed?: number;
-  timeRemaining?: number;
-}
-
-export interface ModificationConfig {
-  needsModification: boolean;
-  isModified?: boolean;
-  config?: {
-    type: 'image' | 'video';
-    quality?: 'high' | 'medium' | 'low';
-    videoKey?: string;
-  };
 }
 
 export interface UploadResult {
@@ -172,47 +160,4 @@ export interface UploadResult {
   data?: any;
   error?: string;
   allFilesSessionId?: string[];
-}
-export interface TrimOptions {
-  startTime?: number | null;
-  endTime?: number | null;
-  quality?: 'high' | 'medium' | 'low';
-  mute?: boolean;
-  onProgress?: (progress: number) => void;
-  useFFmpeg?: boolean;
-  outputFormat?: 'mp4' | 'webm' | 'mkv' | 'mov' | 'avi' | 'flv';
-  fastMode?: boolean; // New option for faster processing
-}
-
-export interface EventCallbacks {
-  onProgress?: (progress: number) => void;
-  onError?: (error: string) => void;
-  onComplete?: (result: Blob) => void;
-  onCancel?: () => void;
-}
-
-export interface VideoMetadata {
-  duration: number;
-  width: number;
-  height: number;
-  hasAudio: boolean;
-  frameRate: number;
-  bitrate?: number;
-  codec?: string;
-  audioCodec?: string;
-}
-
-export interface AudioTrimOptions {
-  startTime?: number | null;
-  endTime?: number | null;
-  quality?: 'high' | 'medium' | 'low';
-  onProgress?: (progress: number) => void;
-  useFFmpeg?: boolean;
-  outputFormat?: 'mp3' | 'wav' | 'aac' | 'ogg' | 'm4a';
-}
-
-export interface AudioEventCallbacks {
-  onProgress?: (progress: number) => void;
-  onError?: (error: string) => void;
-  onComplete?: (result: Blob) => void;
 }

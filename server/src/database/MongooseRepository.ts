@@ -291,7 +291,22 @@ export class MongooseRepository implements MetadataRepository {
       chunkToStore = await this.hooks.beforeCreateChunk(chunk, ctx);
     }
 
-    await this.chunkModel.create(chunkToStore);
+    // Use findOneAndUpdate with upsert to prevent duplicate key errors
+    await this.chunkModel.findOneAndUpdate(
+      {
+        fileId: chunkToStore.fileId,
+        chunkNumber: chunkToStore.chunkNumber
+      },
+      {
+        $set: chunkToStore,
+        $setOnInsert: { createdAt: new Date() }
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true
+      }
+    );
 
     // After hook
     if (this.hooks?.afterCreateChunk) {

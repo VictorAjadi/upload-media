@@ -64,12 +64,12 @@ The engine is built on a **Modular Kernel** architecture. This design separates 
    - **Resolution**: When the "Last Chunk" signal is received, reconciliation ensures no chunks are missing.
 
 5. **Media Finalization**: 
-   - **Reassembly**: Fragments piped through reassembly stream to form final object.
-   - **Transformation**: Triggers thumbnail generation and metadata extraction.
+   - **Reassembly**: Fragments are piped through a high-performance reassembly stream to write the final media object.
+   - **Transformation**: Directs the file through the backend-driven `MediaProcessor` (utilizing `fluent-ffmpeg` and `sharp`). Executes multi-resolution/bitrate transcoding, adaptive variant generation, automatic audio extraction, and frame-seeking thumbnail capture according to the request's `transformer` payload.
 
-6. **Persistence Layer**: Final `FileRecord` committed to `MetadataRepository`.
+6. **Persistence Layer**: Final `FileRecord` (along with refs to generated variants/thumbnails) is committed to the `MetadataRepository`.
 
-7. **Egress**: Framework adapter handles final response per `autoRespond` setting.
+7. **Egress**: The framework adapter handles the final HTTP response JSON payload.
 
 ---
 
@@ -208,39 +208,88 @@ interface UploadResult {
 
 | Property | Type | Required | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `storages` | `Record<string, StorageAdapter>` | Yes | - | Map of storage backends. |
-| `defaultStorage` | `string` | Yes | - | Name of primary storage provider. |
-| `database` | `MetadataRepository` | Yes | - | Database interface for records. |
-| `uploadTypes` | `Record<string, UploadTypeConfig>` | Yes | - | Definitions for upload scenarios. |
-| `autoRespond` | `boolean` | No | `true` | Automatically send JSON responses. |
-| `maxFieldSize` | `number` | No | `1MB` | Size cap for non-file fields. |
-| `maxFiles` | `number` | No | `10` | Max concurrent files per batch. |
-| `staleRetentionMs` | `number` | No | `24h` | TTL before incomplete chunks purged. |
-| `onUploadComplete` | `(file: FileRecord) => void` | No | - | Hook fired after finalization. |
-| `onError` | `(err: Error) => void` | No | - | Global error logging hook. |
-| `hooks` | `EngineHooks` | No | - | Lifecycle hooks for storage/database operations. |
+| `storages` | `Record<string, StorageAdapter>` | Yes | - | Map of storage provider adapters. |
+| `defaultStorage` | `string` | Yes | - | Key of the primary storage provider. |
+| `defaultUploadType` | `string` | No | - | Default upload configuration type name. |
+| `database` | `MetadataRepository` | Yes | - | Metadata and chunk persistence implementation. |
+| `cache` | `CacheAdapter` | No | - | Optional custom or Redis-backed key-value cache layer. |
+| `cacheTtlSeconds` | `number` | No | `300` | TTL in seconds for cached repository records. |
+| `uploadTypes` | `Record<string, UploadTypeConfig>` | Yes | - | Scenario configuration maps (limits, storage target, processing settings). |
+| `globalLimits` | `SizeLimitMap` | No | - | Fallback maximum size limits by media kind. |
+| `globalChunkLimits` | `SizeLimitMap` | No | - | Fallback maximum chunk size bounds by media kind. |
+| `autoRespond` | `boolean` | No | `true` | When true context adapters reply directly to requests. |
+| `maxFieldSize` | `number` | No | `1,048,576` (1MB) | Permissible size threshold for non-file form properties. |
+| `maxFiles` | `number` | No | `10` | Concurrency limit on files uploaded in a batch. |
+| `maxTotalSize` | `number` | No | - | Maximum cumulative size of all files in an upload request. |
+| `staleUploadRetentionMs`| `number` | No | `86,400,000` (24h) | Cumulative TTL duration before partial chunk data is deleted. |
+| `mediaProcessor` | `MediaProcessorOptions` | No | - | Options for parallel and customized FFmpeg/Sharp media processing. |
+| `onUploadComplete` | `(file: FileRecord) => void \| Promise<void>` | No | - | Callback triggered immediately after complete finalization. |
+| `onError` | `(err: Error, context: { uploadType?: string, sessionId?: string }) => void` | No | - | Centralized exception monitoring callback handler. |
+
+---
+
+### `MediaProcessorOptions`
+
+Allows standard control over concurrent jobs running `fluent-ffmpeg` and `sharp` on the server host.
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `tempDir` | `string` | `os.tmpdir()` | Directory route used when generating temporary file variants. |
+| `ffmpegPath` | `string` | `(auto)` | Specific location path config to FFmpeg binary executor. |
+| `ffprobePath` | `string` | `(auto)` | Specific location path config to FFprobe binary executor. |
+| `maxConcurrency` | `number` | `2` | Semaphore concurrent task processing limit for FFmpeg pipelines. |
+| `timeoutMs` | `number` | `600,000` (10m) | Absolute timeout limit per media variant generation action. |
+
+---
 
 ### `UploadTypeConfig`
 
-| Property | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `name` | `string` | - | Context name (e.g., 'post', 'avatar'). |
-| `allowedKinds` | `MediaKind[]` | - | `'image'`, `'video'`, `'audio'`, `'document'`. |
-| `limits` | `SizeLimitMap` | - | Total size limits per media kind. |
-| `chunkLimits` | `SizeLimitMap` | - | Size limits for individual chunks. |
-| `storage` | `string` | - | Storage provider override. |
-| `thumbnails` | `boolean` | `false` | Enable auto-thumbnailing. |
-| `quality` | `'high' \| 'medium' \| 'low'` | `'medium'` | Processing quality (affects all media types). |
+Scenario options specified under key categories matching `uploadType` fields.
 
-### `SizeLimitMap`
+| Property | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `name` | `string` | Yes | Identifier name mapping for the type layout. |
+| `allowedKinds` | `MediaKind[]` | Yes | List of allowed mimetypes: `'image'`, `'video'`, `'audio'`, `'document'`. |
+| `limits` | `SizeLimitMap` | Yes | Allowed total size threshold per file kind in bytes. |
+| `chunkLimits` | `SizeLimitMap` | No | Bound constraints threshold per uploaded chunk. |
+| `storage` | `string` | No | Override key for target storage provider. |
+| `thumbnails` | `boolean` | No | Triggers passive post-finalization thumbnail outputs. |
+| `quality` | `'high' \| 'medium' \| 'low' \| number` | No | Processing quality default setting rules. |
+| `defaultMetadata` | `Record<string, any>`| No | Default key-values to inject into the database file records. |
+
+---
+
+### `FrontendTransformerConfig`
+
+Transformation configurations requested inside client request parameters.
 
 ```typescript
-interface SizeLimitMap {
-  image?: number;    // Size in bytes
-  video?: number;
-  audio?: number;
-  document?: number;
-  [key: string]: number | undefined;
+interface FrontendTransformerConfig {
+  type?: 'image' | 'video' | 'audio';
+  
+  // -- Quality Variant Options --
+  quality?: 'high' | 'medium' | 'low' | number | string;
+  qualities?: ResolutionLabel[]; // Generate multiple resolution-variants e.g. ['1080p', '720p']
+  qualityConfigs?: QualityConfig[] | Record<string, QualityConfig>; // Explicit customized variant settings
+  
+  format?: string; // Container format override (e.g. 'video/mp4', 'mp3', 'webp')
+  
+  // -- Trimming and Modifications --
+  startTime?: number; // Seek trimming offset start point in seconds
+  endTime?: number;   // Seek trimming offset end point in seconds
+  mute?: boolean;     // Disable audio tracks inside the variant.
+  
+  // -- Custom Video Specific overrides --
+  videoBitrate?: string; // Overrides bitrates calculated from the resolution encoding ladder (e.g. '2500k')
+  audioBitrate?: string; // Overrides default audio track encoding bitrate (e.g. '128k')
+  resolution?: string;   // Resolution override
+  codec?: string;        // Target encoder codec name (defaults to 'libx264')
+  generateThumbnail?: boolean; // Poster frame extraction selector (default: true)
+  thumbnailTimeSeconds?: number; // Target frame extraction time point offset
+  
+  // -- Image specific overrides --
+  width?: number; // Width scale constraint
+  height?: number; // Height scale constraint
 }
 ```
 
@@ -982,7 +1031,8 @@ app.post('/api/save', adapter.wrap(async (req, res) => {
 | `ERR_INVALID_MIME` | 415 | Server | File magic bytes don't match expected media type. Block upload. |
 | `ERR_SIZE_EXCEEDED` | 413 | Server | File exceeds size limit in `UploadTypeConfig`. |
 | `ERR_CHUNK_MISMATCH` | 400 | Server | Chunk hashes don't match. Trigger retry. |
-| `ERR_WASM_MEM_LIMIT` | N/A | Client | FFmpeg OOM. Reduce quality to `'low'`. |
+| `ERR_PROCESSING_FAILED`| 500 | Server | Media transformation, variant transcoding, or thumbnail generation failed. Check FFmpeg logs. |
+| `ERR_FFMPEG_NOT_FOUND` | 500 | Server | FFmpeg or FFprobe binaries not found on the host system. Install FFmpeg or configure `ffmpegPath`/`ffprobePath`. |
 | `ERR_IDB_QUOTA_FULL` | N/A | Client | IndexedDB full. Call `manager.clear('completed')`. |
 | `ERR_AUTH_EXPIRED` | 401 | Adapter | Refresh token using `onBackground` hook. |
 
@@ -1036,7 +1086,7 @@ expect(result.status).toBe('success');
 | :--- | :--- | :--- |
 | **HTTP 413 Payload Too Large** | Nginx/Proxy limit | Increase `client_max_body_size` to `0`. |
 | **Invalid MIME Type** | Sniffing failure | Ensure chunk overlaps with file magic header. |
-| **Lost Chunks** | Improper cleanup | Configure `staleRetentionMs` for your traffic. |
+| **Lost Chunks** | Improper cleanup | Configure `staleUploadRetentionMs` for your traffic. |
 | **Video seek failed** | Range header missing | Use our serving middleware. |
 | **Database contention** | High chunk volume | Integrate `@mongoose-performance-cache` or Redis. |
 | **S3 UploadPart failed** | Part size < 5MB | Increase minPartSize or ensure buffering works. |
@@ -1053,7 +1103,7 @@ expect(result.status).toBe('success');
 | **Cost Model** | Pay for storage | Pay per image/video ops | Free (hardware) | Included with DB |
 | **CDN** | Requires CloudFront | Built-in CDN | Manual | Manual |
 | **Transformations** | Via Lambda/API | Built-in v2 API | Manual processing | Manual processing |
-| **Best For** | Large scale, cost-optimized | Media first, instant transform | Dev/testing | Medium files, backup |
+| **Best For** | Large scale, cost-optimized | Media first, instant transform | Dev/testing | Medium to Large files, backup |
 | **Setup Complexity** | Medium | Low | Trivial | Low |
 | **Client Injection** | ✅ Yes (S3Client) | ✅ Yes (v2 instance) | No | No |
 

@@ -1,224 +1,156 @@
 /**
- * @upload-media/client - React Hooks
+ * React hook for file uploads – Zustand powered
+ * Exports all store actions and state selectors.
+ * Should ONLY be imported from '@upload-media/client/react'
  */
 
-import { useEffect, useRef, useCallback, useState } from 'react';
-import { useStore } from 'zustand'; // Bridges the vanilla store to React
-import { UploadManager, UploadManagerConfig } from '../manager/UploadManager';
+import { useEffect, useCallback } from 'react';
+import { useStore } from 'zustand';
+import { useShallow } from 'zustand/react/shallow';
+import { useUploadProgress as vanillaStore } from '../store/useUploadProgress';
+import { generateSessionId } from '../utils/sessionId';
 import { UploadOptions } from '../types';
 
-// 1. Import your raw vanilla store instance 
-import { useUploadProgress as vanillaUploadProgressStore } from '../store/useUploadProgress';
+export { useUploadProgress } from '../store/useUploadProgress';
 
-/**
- * 2. Create a reactive React hook from the vanilla store.
- * This satisfies the syntax: useUploadProgress((state) => state.uploads)
- */
-const useUploadProgress = <T>(selector: (state: any) => T): T => {
-  return useStore(vanillaUploadProgressStore, selector);
-};
+export function useUpload() {
+  const {
+    uploads,
+    totalProgress,
+    activeUploads,
+    completedUploads,
+    failedUploads,
+    pausedUploads,
+    hasUploads,
+    hasActiveUploads,
+    canResumeAnyUpload,
 
-/**
- * useUpload - Main hook for file uploads
- */
-export function useUpload(config?: UploadManagerConfig) {
-  const managerRef = useRef<UploadManager | null>(null);
-  const storeUploads = useUploadProgress((state) => state.uploads);
-  const addUpload = useUploadProgress((state) => state.addUpload);
-  const updateProgress = useUploadProgress((state) => state.updateProgress);
-  const totalProgress = useUploadProgress((state) => state.totalProgress);
-  const activeCount = useUploadProgress((state) => state.activeUploads);
+    // Actions (same as vanilla useUploadActions)
+    addUpload,
+    initializeUpload,
+    updateProgress,
+    pauseUpload,
+    resumeUpload,
+    cancelUpload,
+    retryUpload,
+    removeUpload,
+    clearCompleted,
+    clearFailed,
+    clearAll,
+    checkForResumableUploads,
+    createWorker,
+    terminateWorker,
+    getUpload,
+  } = useStore(
+    vanillaStore,
+    useShallow((state) => ({
+      uploads: state.uploads,
+      totalProgress: state.totalProgress,
+      activeUploads: state.activeUploads,
+      completedUploads: state.completedUploads,
+      failedUploads: state.failedUploads,
+      pausedUploads: state.pausedUploads,
+      hasUploads: state.hasUploads,
+      hasActiveUploads: state.hasActiveUploads,
+      canResumeAnyUpload: state.canResumeAnyUpload,
 
+      addUpload: state.addUpload,
+      initializeUpload: state.initializeUpload,
+      updateProgress: state.updateProgress,
+      pauseUpload: state.pauseUpload,
+      resumeUpload: state.resumeUpload,
+      cancelUpload: state.cancelUpload,
+      retryUpload: state.retryUpload,
+      removeUpload: state.removeUpload,
+      clearCompleted: state.clearCompleted,
+      clearFailed: state.clearFailed,
+      clearAll: state.clearAll,
+      checkForResumableUploads: state.checkForResumableUploads,
+      createWorker: state.createWorker,
+      terminateWorker: state.terminateWorker,
+      getUpload: state.getUpload,
+    }))
+  );
+
+  // ─── Optional: check for resumable uploads on mount ──────────────
   useEffect(() => {
-    managerRef.current = new UploadManager({
-      ...config,
-      onProgress: (progress) => {
-        updateProgress(progress.uploadId, {
-          progress: progress.overallProgress,
-          status: progress.status,
-          error: progress.error
-        });
-        config?.onProgress?.(progress);
-      },
-      onComplete: (result) => {
-        config?.onComplete?.(result);
-      },
-      onError: (error) => {
-        config?.onError?.(error);
-      },
-    });
+    checkForResumableUploads().catch(console.error);
+  }, [checkForResumableUploads]);
 
-    return () => {
-      managerRef.current?.destroy();
-    };
-  }, []);
-
+  // ─── Convenience `upload` function (combines add + initialize) ────
   const upload = useCallback(
     async (files: File[], fieldnames: string[], options: UploadOptions) => {
-      if (!managerRef.current) {
-        throw new Error('Upload manager not initialized');
+      if (!files || files.length === 0) {
+        throw new Error('No files provided');
       }
-      return managerRef.current.upload(files, fieldnames, options);
+      if (files.length !== fieldnames.length) {
+        throw new Error('Files and fieldnames length mismatch');
+      }
+
+      const uploadId = options.uploadId || generateSessionId();
+
+      // Step 1: add upload to store (metadata)
+      addUpload({
+        uploadId,
+        fileName: files[0]?.name || '',
+        fileSize: files[0]?.size || 0,
+        fileType: files[0]?.type || '',
+        endpoint: options.endpoint || '/upload',
+        method: options.method || 'POST',
+        postData: options.postData,
+        metadata: options.metadata,
+        uploadType: options.uploadType || 'file',
+      });
+
+      // Step 2: start the actual upload (worker)
+      initializeUpload({
+        uploadId,
+        blobs: files,
+        filenameArray: files.map((f) => f.name),
+        endpoint: options.endpoint || '/upload',
+        method: options.method || 'POST',
+        postData: options.postData,
+        metadata: options.metadata,
+        uploadType: options.uploadType || 'file',
+        transformer: options.transformer,
+      });
+
+      return uploadId;
     },
-    []
+    [addUpload, initializeUpload]
   );
 
-  const pause = useCallback((uploadId: string) => {
-    managerRef.current?.pause(uploadId);
-  }, []);
-
-  const resume = useCallback((uploadId: string) => {
-    managerRef.current?.resume(uploadId);
-  }, []);
-
-  const cancel = useCallback((uploadId: string) => {
-    managerRef.current?.cancel(uploadId);
-  }, []);
-
-  const remove = useCallback((uploadId: string) => {
-    managerRef.current?.remove(uploadId);
-  }, []);
-
+  // ─── Expose everything ──────────────────────────────────────────────
   return {
+    // State
+    uploads,
+    totalProgress,
+    activeUploads,
+    completedUploads,
+    failedUploads,
+    pausedUploads,
+    hasUploads,
+    hasActiveUploads,
+    canResumeAnyUpload,
+
     upload,
-    pause,
-    resume,
-    cancel,
-    remove,
-    uploads: storeUploads,
     addUpload,
-    manager: managerRef.current,
-    totalProgress,
-    activeCount
-  };
-}
+    initializeUpload,
+    updateProgress,
+    pauseUpload,
+    resumeUpload,
+    cancelUpload,
+    retryUpload,
+    removeUpload,
+    clearCompleted,
+    clearFailed,
+    clearAll,
+    checkForResumableUploads,
+    createWorker,
+    terminateWorker,
+    getUpload,
 
-/**
- * useVideoTrim - Hook for video trimming
- */
-export function useVideoTrim() {
-  const trimmerRef = useRef<any>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [progress, setProgress] = useState(0);
-
-  const trim = useCallback(
-    async (file: File, startTime: number, endTime: number, quality = 'medium') => {
-      setIsProcessing(true);
-      setProgress(0);
-
-      try {
-        const { VideoTrimmer } = await import('./useVideoTrimmer');
-
-        const trimmer = new VideoTrimmer({
-          onProgress: setProgress,
-          onComplete: () => setIsProcessing(false),
-          onError: (error) => {
-            console.error('Trim error:', error);
-            setIsProcessing(false);
-          },
-        });
-
-        trimmerRef.current = trimmer;
-
-        const result = await trimmer.trimVideo(file, {
-          startTime,
-          endTime,
-          quality: quality as any,
-        });
-
-        return result;
-      } catch (error) {
-        setIsProcessing(false);
-        throw error;
-      }
-    },
-    []
-  );
-
-  const cancel = useCallback(() => {
-    trimmerRef.current?.cancel();
-  }, []);
-
-  return {
-    trim,
-    cancel,
-    isProcessing,
-    progress,
-  };
-}
-
-/**
- * useAudioTrim - Hook for audio trimming
- */
-export function useAudioTrim() {
-  const trimmerRef = useRef<any>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [progress, setProgress] = useState(0);
-
-  const trim = useCallback(
-    async (file: File, startTime: number, endTime: number, quality = 'medium') => {
-      setIsProcessing(true);
-      setProgress(0);
-
-      try {
-        const { AudioTrimmer } = await import('./useAudioTrimmer');
-
-        const trimmer = new AudioTrimmer({
-          onProgress: setProgress,
-          onComplete: () => setIsProcessing(false),
-          onError: (error) => {
-            console.error('Trim error:', error);
-            setIsProcessing(false);
-          },
-        });
-
-        trimmerRef.current = trimmer;
-
-        const result = await trimmer.trimAudio(file, {
-          startTime,
-          endTime,
-          quality: quality as any,
-        });
-
-        return result;
-      } catch (error) {
-        setIsProcessing(false);
-        throw error;
-      }
-    },
-    []
-  );
-
-  const cancel = useCallback(() => {
-    trimmerRef.current?.cancel();
-  }, []);
-
-  return {
-    trim,
-    cancel,
-    isProcessing,
-    progress,
-  };
-}
-/**
- * useUploadState - Hook for accessing upload state
- */
-export function useUploadState(uploadId?: string) {
-  const uploads = useUploadProgress((state) => state.uploads);
-  const getUpload = useUploadProgress((state) => state.getUpload);
-  const totalProgress = useUploadProgress((state) => state.totalProgress);
-  const activeCount = useUploadProgress((state) => state.activeUploads);
-
-  const currentUpload = uploadId ? getUpload(uploadId) : uploads.find((u: any) => u.status === 'uploading');
-
-  return {
-    currentUpload,
-    allUploads: uploads,
-    totalProgress,
-    activeCount,
-    isActive: currentUpload?.status === 'uploading',
-    isPaused: currentUpload?.status === 'paused',
-    isFailed: currentUpload?.status === 'failed',
-    isCompleted: currentUpload?.status === 'completed',
+    // Extra: low‑level worker termination for all
+    terminateAllWorkers: vanillaStore.getState().terminateAllWorkers,
   };
 }

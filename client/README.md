@@ -12,8 +12,7 @@
 - 🧱 **Resumable Chunking**: Intelligent splitting of files with persistable session state via IndexedDB.
 - 🔄 **Total Persistence**: Survives page refreshes, tab closures, and browser crashes.
 - 📊 **Real-Time Analytics**: Built-in speed calculators, ETAs, and per-file progress tracking.
-- ✂️ **Browser-Side Trimming/Quality Modification**: Trim and transcode videos/audio in-browser using **WASM FFmpeg**.
-- 🖼️ **Client-Side Previews**: Immediate JPEG/Canvas thumbnails for zero-latency UI feedback.
+- ⚙️ **Backend Processing Integration**: Request video variant encoding, audio extraction, and image resizing/compression from the server via custom `transformer` options.
 - 🛠️ **State Management**: Built-in Zustand store for reactive progress tracking.
 - ⚡ **Framework Agnostic**: Works with React, Vue, Svelte, Solid, Angular or Vanilla JS.
 
@@ -31,7 +30,7 @@ The library follows a strict **Message-Oriented Architecture** to ensure that th
 ### 2. The Worker (Background Thread)
 *   **Queue Manager**: Handles concurrency limits to prevent network socket exhaustion.
 *   **Heartbeat**: Monitors connectivity and triggers retries on transient network failures.
-*   **WASM Bridge**: Mounts an internal instance of FFmpeg for on-the-fly media manipulation.
+*   **Safe Chunking**: Piles and feeds file chunks to the network stack off-thread, keeping memory overhead at zero.
 
 ### 3. The Persistence Layer (IndexedDB)
 *   **Manifests**: Stores the upload plan (endpoints, headers, file paths).
@@ -44,56 +43,54 @@ The library follows a strict **Message-Oriented Architecture** to ensure that th
 
 ### 1. React Setup (Recommended)
 
-#### Step 1: Create the Zustand Bridge Hook
+Import the built-in React hooks directly from `upload-media-client/react` to orchestrate state and actions reactively.
+
+#### Code Example (components/FileUploader.tsx)
 
 ```typescript
-// hooks/useUploadProgress.ts
-import { useStore } from 'zustand';
-// Import the raw vanilla store instance 
-import { useUploadProgress as vanillaUploadProgressStore } from 'upload-media-client';
-
-/**
- * Create a reactive React hook from the vanilla store.
- * This satisfies the syntax: useUploadProgress((state) => state.uploads)
- */
-export const useUploadProgress = <T>(selector: (state: any) => T): T => {
-  return useStore(vanillaUploadProgressStore, selector);
-};
-```
-
-#### Step 2: Build Your React Component
-
-```typescript
-// components/FileUploader.tsx
 import { useRef } from 'react';
-import { useUploadActions,useUploadProgress } from 'upload-media-client';
+import { useUpload } from 'upload-media-client/react';
 
 export function FileUploader() {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { initializeUpload, pauseUpload, resumeUpload, cancelUpload } = useUploadActions();
   
-  // Subscribe to upload state reactively
-  const uploads = useUploadProgress(s => s.uploads);
-  const totalProgress = useUploadProgress(s => s.totalProgress);
+  // useUpload exposes both the reactive state and standard control actions
+  const { 
+    uploads, 
+    totalProgress, 
+    upload, 
+    pauseUpload, 
+    resumeUpload, 
+    cancelUpload 
+  } = useUpload();
 
-  const handleUpload = () => {
+  const handleUpload = async () => {
     const files = Array.from(fileInputRef.current?.files || []);
     if (files.length === 0) return;
 
-    initializeUpload({
-      uploadId: `upload_${Date.now()}`,
-      blobs: files,
-      filenameArray: files.map(f => f.name),
-      endpoint: 'http://localhost:3000/api/upload',
-      method: 'POST',
-      // Optional: Add custom data or field mappings
-      metadata: files.map((_, i) => ({ fieldname: 'files' })),
-      postData: { userId: '123', category: 'photos' }
-    });
+    // This launches a multi-file chunked upload, fully persisted in IndexedDB
+    const uploadId = await upload(
+      files,
+      files.map(() => 'file'), // Form fieldnames mapping
+      {
+        endpoint: 'http://localhost:3000/api/upload',
+        method: 'POST',
+        uploadType: 'video', // Backend type config
+        postData: { userId: '123' },
+        // Backend media processing options
+        transformer: {
+          type: 'video',
+          qualities: ['1080p', '720p', '480p'], // Request multiple video qualities
+          format: 'video/mp4',
+          generateThumbnail: true
+        }
+      }
+    );
+    console.log('Upload started:', uploadId);
   };
 
   return (
-    <div className="space-y-6 p-6 bg-slate-900 rounded-lg">
+    <div className="space-y-6 p-6 bg-slate-900 rounded-lg text-white">
       <input
         ref={fileInputRef}
         type="file"
@@ -103,7 +100,7 @@ export function FileUploader() {
       
       <button
         onClick={handleUpload}
-        className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+        className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 font-medium"
       >
         Upload Files
       </button>
@@ -111,7 +108,7 @@ export function FileUploader() {
       {/* Overall progress bar */}
       <div className="w-full bg-slate-800 rounded h-2">
         <div
-          className="h-full bg-blue-500 transition-all"
+          className="h-full bg-blue-500 transition-all duration-300"
           style={{ width: `${totalProgress}%` }}
         />
       </div>
@@ -122,11 +119,11 @@ export function FileUploader() {
           <div key={upload.uploadId} className="p-4 bg-slate-800 rounded">
             <div className="flex justify-between mb-2">
               <span className="font-bold">{upload.fileName}</span>
-              <span className="text-sm">{upload.overallProgress}%</span>
+              <span className="text-sm">{Math.round(upload.overallProgress)}%</span>
             </div>
             <div className="w-full bg-slate-700 rounded h-1.5 mb-2">
               <div
-                className="h-full bg-green-500 transition-all"
+                className="h-full bg-green-500 transition-all duration-300"
                 style={{ width: `${upload.overallProgress}%` }}
               />
             </div>
@@ -135,13 +132,13 @@ export function FileUploader() {
                 <>
                   <button 
                     onClick={() => pauseUpload(upload.uploadId)} 
-                    className="text-xs bg-yellow-600 px-2 py-1 rounded"
+                    className="text-xs bg-yellow-600 px-2 py-1 rounded hover:bg-yellow-700"
                   >
                     Pause
                   </button>
                   <button 
                     onClick={() => cancelUpload(upload.uploadId)} 
-                    className="text-xs bg-red-600 px-2 py-1 rounded"
+                    className="text-xs bg-red-600 px-2 py-1 rounded hover:bg-red-700"
                   >
                     Cancel
                   </button>
@@ -149,14 +146,14 @@ export function FileUploader() {
               ) : upload.status === 'paused' ? (
                 <button 
                   onClick={() => resumeUpload(upload.uploadId)} 
-                  className="text-xs bg-blue-600 px-2 py-1 rounded"
+                  className="text-xs bg-blue-600 px-2 py-1 rounded hover:bg-blue-700"
                 >
                   Resume
                 </button>
               ) : null}
             </div>
             <p className="text-xs text-slate-400 mt-2">
-              Status: {upload.status} {upload.error && `- ${upload.error}`}
+              Status: <span className="font-semibold text-slate-300">{upload.status}</span> {upload.error && `- ${upload.error}`}
             </p>
           </div>
         ))}
@@ -180,9 +177,7 @@ export function FileUploader() {
       "upload-media-client": "https://unpkg.com/upload-media-client@latest/dist/index.mjs",
       "zustand/vanilla": "https://unpkg.com/zustand@latest/esm/vanilla.mjs",
       "zustand/middleware": "https://unpkg.com/zustand@latest/esm/middleware.mjs",
-      "immer": "https://unpkg.com/immer@latest/dist/immer.mjs",
-      "@ffmpeg/ffmpeg": "https://unpkg.com/@ffmpeg/ffmpeg@latest/dist/esm/index.js",
-      "@ffmpeg/util": "https://unpkg.com/@ffmpeg/util@latest/dist/esm/index.js"
+      "immer": "https://unpkg.com/immer@latest/dist/immer.mjs"
     }
   }
   </script>
@@ -190,6 +185,7 @@ export function FileUploader() {
 <body>
   <input type="file" id="fileInput" multiple />
   <button id="uploadBtn">Upload (Chunked)</button>
+  <button id="uploadMultiBtn">Upload (Multi-Quality)</button>
   <button id="uploadDirectBtn">Upload (Direct)</button>
   <div id="uploadList"></div>
   <div id="gallery"></div>
@@ -205,6 +201,7 @@ import { useUploadActions, useUploadProgress, setUploadMediaConfig } from 'uploa
 
 const fileInput = document.getElementById('fileInput');
 const uploadBtn = document.getElementById('uploadBtn');
+const uploadMultiBtn = document.getElementById('uploadMultiBtn');
 const uploadDirectBtn = document.getElementById('uploadDirectBtn');
 const uploadList = document.getElementById('uploadList');
 const gallery = document.getElementById('gallery');
@@ -235,7 +232,8 @@ uploadBtn.addEventListener('click', () => {
         blobs: files,
         filenameArray: files.map(f => f.name),
         endpoint: 'http://localhost:3000/api/upload?uploadType=avatar',
-        method: 'POST'
+        method: 'POST',
+        uploadType: 'avatar'
     });
 });
 
@@ -249,8 +247,6 @@ uploadDirectBtn.addEventListener('click', async () => {
 
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        const uploadId = 'upload_direct_' + Date.now() + '_' + i;
-
         try {
             const formData = new FormData();
             formData.append('file', file);
@@ -260,22 +256,45 @@ uploadDirectBtn.addEventListener('click', async () => {
                 method: 'POST',
                 body: formData
             });
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-
             const result = await response.json();
             console.log(`✅ Direct upload success:`, result);
-
-            // Add to gallery if image
-            if (file.type.startsWith('image/') && result.url) {
-                addToGallery(file.name, result.url);
-            }
         } catch (error) {
             console.error(`❌ Direct upload failed for ${file.name}:`, error);
         }
     }
+});
+
+// 3. MULTI-QUALITY CHUNKED UPLOAD
+uploadMultiBtn.addEventListener('click', () => {
+    const files = Array.from(fileInput.files || []);
+    if (files.length === 0) {
+        alert('Please select files');
+        return;
+    }
+
+    initializeUpload({
+        uploadId: 'upload_multi_' + Date.now(),
+        blobs: files,
+        filenameArray: files.map(f => f.name),
+        endpoint: 'http://localhost:3000/api/upload?uploadType=video',
+        method: 'POST',
+        uploadType: 'video',
+        transformer: {
+            qualities: ['high', 'medium', 80, 40], // Transcode multiple qualities (resolution labels or quality percentage)
+            format: 'video/mp4',
+            video: {
+                quality: 60,
+                adaptiveBitrate: true
+            },
+            audio: {
+                audioBitrate: '128k',
+                quality: 85
+            },
+            image: {
+                quality: 90
+            }
+        }
+    });
 });
 
 // Subscribe to real-time progress
@@ -337,21 +356,24 @@ function addToGallery(filename, url) {
 #### Vue 3 (Composition API)
 ```typescript
 import { ref } from 'vue';
-import { useUploadActions,useUploadProgress } from 'upload-media-client';
+import { useUploadActions, useUploadProgress } from 'upload-media-client';
 
 export default {
   setup() {
-    const files = ref(null);
+    const files = ref<File[]>([]);
     const { initializeUpload } = useUploadActions();
     const { uploads, totalProgress } = useUploadProgress();
 
     const handleUpload = () => {
       if (!files.value?.length) return;
 
+      const fileList = Array.from(files.value);
       initializeUpload({
         uploadId: `upload_${Date.now()}`,
-        blobs: Array.from(files.value),
-        endpoint: '/api/upload'
+        blobs: fileList,
+        filenameArray: fileList.map(f => f.name),
+        endpoint: '/api/upload',
+        uploadType: 'file' // Matches allowed uploadType on server
       });
     };
 
@@ -363,7 +385,7 @@ export default {
 #### Svelte
 ```typescript
 <script>
-  import { useUploadActions,useUploadProgress } from 'upload-media-client';
+  import { useUploadActions, useUploadProgress } from 'upload-media-client';
 
   let fileInput;
   const { initializeUpload } = useUploadActions();
@@ -376,7 +398,9 @@ export default {
     initializeUpload({
       uploadId: `upload_${Date.now()}`,
       blobs: files,
-      endpoint: '/api/upload'
+      filenameArray: files.map(f => f.name),
+      endpoint: '/api/upload',
+      uploadType: 'file'
     });
   }
 </script>
@@ -468,55 +492,52 @@ setUploadMediaConfig({
 | Key | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
 | `uploadId` | `string` | Yes | Unique session identifier. |
-| `blobs` | `File[]` | Yes | Array of File/Blob objects. |
+| `blobs` | `Blob[]` | Yes | Array of File/Blob objects to upload. |
+| `filenameArray` | `string[]` | Yes | Filenames corresponding to each blob index. |
+| `uploadType` | `string` | Yes | Target configuration type on the server (e.g. `'video'`, `'avatar'`). |
 | `endpoint` | `string` | Yes | Server URL for chunk ingestion. |
-| `method` | `string` | No | HTTP method (default: 'POST'). |
-| `metadata` | `object[]` | No | Maps blobs to fieldname keys. |
-| `postData` | `object` | No | Extra form fields sent with every chunk. |
-| `transformer` | `object` | No | Transformation config (quality, format). |
-| `transformer.quality` | `'high' \| 'medium' \| 'low' \| number` | No | Quality level or percentage (0-100). |
-| `transformer.qualities` | `string[]` | No | Generate multiple variants: ['high', 'medium', 'low']. |
-| `transformer.format` | `string` | No | Output format (e.g., 'image/jpeg', 'video/mp4'). |
+| `method` | `string` | No | HTTP method (default: `'POST'`). |
+| `metadata` | `object[]` | No | Array of metadata objects matching each blob index. |
+| `postData` | `object` | No | Extra form fields sent as part of the chunk payload. |
+| `transformer` | `object` | No | Transformation instructions for server-side processing. |
+| `transformer.type` | `'image' \| 'video' \| 'audio'` | No | Categories matching the uploaded media format. |
+| `transformer.quality` | `'high' \| 'medium' \| 'low' \| number` | No | Target encoding quality label or percentage value. |
+| `transformer.qualities` | `string[]` | No | Named resolutions/configurations to generate custom variants (e.g. `['1080p', '720p']`). |
+| `transformer.format` | `string` | No | Desired output mimetype (e.g. `'video/mp4'`, `'image/webp'`). |
+| `transformer.startTime` | `number` | No | Trim start point in seconds for video/audio. |
+| `transformer.endTime` | `number` | No | Trim end point in seconds for video/audio. |
+| `transformer.mute` | `boolean` | No | Mutes audio track of processed video variants. |
+| `transformer.generateThumbnail`| `boolean` | No | Instructs backend to generate poster frames. |
 
 ---
 
-## ✂️ Media Trimming/ Quality Modification & Processing
+## 🎨 Server-Side Media Processing Configuration
 
-The library includes browser-side WASM tools for trimming videos and audio without server processing.
+Since media processing runs on the server, you simply pass the desired conversion, variant, and trimming actions inside the `transformer` config.
 
 ```typescript
-import { useVideoTrimmer, useAudioTrimmer } from 'upload-media-client';
+import { useUpload } from 'upload-media-client/react';
 
-// Video trimming
-const { trim: trimVideo, cancel } = useVideoTrimmer();
-const trimmedVideo = await trimVideo(videoFile, {
-  startTime: 10,  // seconds
-  endTime: 60,    // seconds
-  quality: 'medium'
-});
+const { upload } = useUpload();
 
-// Audio trimming
-const { trim: trimAudio } = useAudioTrimmer();
-const trimmedAudio = await trimAudio(audioFile, {
-  startTime: 0,
-  endTime: 30,
-  quality: 'high'
-});
-
-// Integrated trimming with upload
-initializeUpload({
-  blobs: [videoFile],
-  transform: true,           // Enable WASM processing
-  videoStartTime: 10,
-  videoEndTime: 60,
-  endpoint: '/api/upload'
-});
-```
-
-**⚠️ Note:** WASM trimming requires Cross-Origin Isolation headers:
-```
-Cross-Origin-Opener-Policy: same-origin
-Cross-Origin-Embedder-Policy: require-corp
+// Upload a video and trigger high-speed server-side variant encoding & trimming
+await upload(
+  [file], 
+  [file.name], 
+  {
+    endpoint: '/api/upload',
+    uploadType: 'video',
+    transformer: {
+      type: 'video',
+      startTime: 12.5,                // Trim: start at 12.5 seconds
+      endTime: 55.0,                  // Trim: end at 55.0 seconds
+      mute: false,                    // Keep audio track
+      generateThumbnail: true,        // Generate static PNG thumbnail
+      thumbnailTimeSeconds: 5,        // Extract thumbnail at second 5
+      qualities: ['1080p', '720p', '480p'] // Generate multiple quality variants
+    }
+  }
+);
 ```
 
 ---
@@ -563,7 +584,6 @@ state.uploads
 | **Worker initialization error** | Cross-Domain | Ensure `workerUrl` is on the same origin (or CORS headers allow). |
 | **Progress stuck at 100%** | Finalization | Client waiting for `status: 'success'` response from server. |
 | **Memory usage high** | Concurrency | Reduce `maxConcurrentUploads` in config. |
-| **SharedArrayBuffer error** | Missing headers | Add COOP/COEP headers if using WASM trimming. |
 
 ---
 

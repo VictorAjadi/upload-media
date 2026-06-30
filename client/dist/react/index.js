@@ -3,7 +3,6 @@ var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
@@ -17,42 +16,20 @@ var __copyProps = (to, from, except, desc) => {
   return to;
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
-var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
-// src/index.ts
+// src/react/index.ts
 var index_exports = {};
 __export(index_exports, {
-  UploadManager: () => UploadManager,
-  cleanupUploadResources: () => cleanupUploadResources,
-  getUploadMediaConfig: () => getUploadMediaConfig,
-  setUploadMediaConfig: () => setUploadMediaConfig,
-  useUploadActions: () => useUploadActions,
-  useUploadProgress: () => useUploadProgress
+  useUpload: () => useUpload,
+  useUploadProgress: () => useUploadProgress,
+  useUploadState: () => useUploadState
 });
 module.exports = __toCommonJS(index_exports);
 
-// src/config.ts
-var currentConfig = {
-  getCookie: () => null,
-  encryptQueryString: (data) => JSON.stringify(data),
-  showToast: {
-    success: console.log,
-    error: console.error,
-    info: console.info,
-    warning: console.warn
-  },
-  videoState: {
-    getState: () => ({
-      videos: {},
-      clearVideoState: () => {
-      }
-    })
-  }
-};
-var setUploadMediaConfig = (config) => {
-  currentConfig = { ...currentConfig, ...config };
-};
-var getUploadMediaConfig = () => currentConfig;
+// src/hooks/useUpload.ts
+var import_react = require("react");
+var import_zustand = require("zustand");
+var import_shallow = require("zustand/react/shallow");
 
 // src/store/useUploadProgress.ts
 var import_vanilla = require("zustand/vanilla");
@@ -749,29 +726,6 @@ var useUploadProgress = (0, import_vanilla.createStore)()(
     }
   )
 );
-var useUploadActions = () => {
-  const store = useUploadProgress.getState();
-  return {
-    addUpload: store.addUpload,
-    initializeUpload: store.initializeUpload,
-    updateProgress: store.updateProgress,
-    pauseUpload: store.pauseUpload,
-    resumeUpload: store.resumeUpload,
-    cancelUpload: store.cancelUpload,
-    retryUpload: store.retryUpload,
-    removeUpload: store.removeUpload,
-    clearCompleted: store.clearCompleted,
-    clearFailed: store.clearFailed,
-    clearAll: store.clearAll,
-    checkForResumableUploads: store.checkForResumableUploads,
-    createWorker: store.createWorker
-  };
-};
-var cleanupUploadResources = () => {
-  const { terminateAllWorkers } = useUploadProgress.getState();
-  terminateAllWorkers();
-  speedCalculators.clear();
-};
 
 // src/utils/sessionId.ts
 function generateSessionId() {
@@ -780,436 +734,152 @@ function generateSessionId() {
   return `${randomStr}-${timestamp}`;
 }
 
-// src/constants.ts
-var DEFAULT_CHUNK_SIZES = {
-  video: 2 * 1024 * 1024,
-  audio: 2 * 1024 * 1024,
-  image: 1 * 1024 * 1024,
-  document: 5 * 1024 * 1024,
-  default: 1 * 1024 * 1024
-};
-var DEFAULT_MAX_RETRIES = 3;
-var CHUNK_SIZES2 = DEFAULT_CHUNK_SIZES;
-var MAX_RETRIES2 = DEFAULT_MAX_RETRIES;
-
-// src/manager/UploadManager.ts
-var import_meta2 = {};
-var UploadManager = class {
-  constructor(config = {}) {
-    __publicField(this, "worker", null);
-    __publicField(this, "uploads", /* @__PURE__ */ new Map());
-    __publicField(this, "config");
-    __publicField(this, "eventListeners", /* @__PURE__ */ new Map());
-    this.config = {
-      workerUrl: config.workerUrl || this.getDefaultWorkerUrl(),
-      onProgress: config.onProgress || (() => {
-      }),
-      onComplete: config.onComplete || (() => {
-      }),
-      onError: config.onError || ((err) => console.error(err)),
-      storageKey: config.storageKey || "upload-progress"
-    };
-    this.initializeWorker();
-    this.restoreFromStorage();
-  }
-  /**
-   * Get default worker URL based on environment and format
-   */
-  getDefaultWorkerUrl() {
-    if (typeof window === "undefined") {
-      return "";
-    }
-    try {
-      if (typeof import_meta2 !== "undefined" && import_meta2.url) {
-        try {
-          return new URL("../dist/worker/upload.worker.mjs", import_meta2.url).href;
-        } catch (e) {
-          try {
-            return new URL("../worker/upload.worker.ts", import_meta2.url).href;
-          } catch (fallbackError) {
-            return this.getWorkerUrlFallback();
-          }
-        }
-      } else {
-        return this.getWorkerUrlFallback();
-      }
-    } catch (error) {
-      console.warn("Failed to get worker URL via import.meta, using fallback:", error);
-      return this.getWorkerUrlFallback();
-    }
-  }
-  /**
-   * Fallback method to get worker URL without import.meta
-   */
-  getWorkerUrlFallback() {
-    if (typeof document !== "undefined") {
-      const scripts = document.getElementsByTagName("script");
-      if (scripts.length > 0) {
-        for (const script of scripts) {
-          if (script.src && script.src.includes("upload-media")) {
-            const baseUrl = script.src.substring(0, script.src.lastIndexOf("/") + 1);
-            return `${baseUrl}worker/upload.worker.mjs`;
-          }
-        }
-      }
-    }
-    return "/worker/upload.worker.mjs";
-  }
-  /**
-   * Initialize and setup Web Worker
-   */
-  initializeWorker() {
-    try {
-      const workerUrl = this.config.workerUrl;
-      if (!workerUrl) {
-        console.warn("[Worker] No worker URL provided, skipping worker initialization");
-        return;
-      }
-      try {
-        this.worker = new Worker(workerUrl, { type: "module" });
-      } catch (error) {
-        console.warn("[Worker] Module worker failed, trying classic worker:", error);
-        try {
-          this.worker = new Worker(workerUrl);
-        } catch (fallbackError) {
-          console.error("[Worker] Classic worker also failed:", fallbackError);
-          throw fallbackError;
-        }
-      }
-      this.worker.onmessage = (event) => {
-        this.handleWorkerMessage(event.data);
-      };
-      this.worker.onerror = (error) => {
-        console.error("[Worker Error]", error);
-        this.config.onError?.(new Error(`Worker error: ${error.message}`));
-      };
-    } catch (error) {
-      console.error("[Worker] Failed to initialize worker:", error);
-      this.config.onError?.(new Error("Worker initialization failed"));
-    }
-  }
-  /**
-   * Handle messages from Worker
-   */
-  handleWorkerMessage(message) {
-    const { type, uploadId } = message;
-    switch (type) {
-      case "upload_started":
-        this.emit("started", { uploadId, message: message.message });
-        break;
-      case "progress":
-        this.updateProgress(uploadId, message);
-        break;
-      case "success":
-        this.handleUploadSuccess(uploadId, message);
-        break;
-      case "error":
-        this.handleUploadError(uploadId, message);
-        break;
-      case "paused":
-        this.emit("paused", { uploadId });
-        break;
-      case "cancelled":
-        this.emit("cancelled", { uploadId });
-        break;
-      case "request_token":
-        this.handleTokenRequest();
-        break;
-      case "request_transformation":
-        this.handleTransformationRequest(message);
-        break;
-      default:
-        break;
-    }
-  }
-  /**
-   * Handle transformation request from worker
-   */
-  async handleTransformationRequest(message) {
-  }
-  /**
-   * Upload files with optional chunking and resume support
-   */
-  async upload(files, fieldnames, options) {
-    const uploadId = options.uploadId || generateSessionId();
-    try {
+// src/hooks/useUpload.ts
+function useUpload() {
+  const {
+    uploads,
+    totalProgress,
+    activeUploads,
+    completedUploads,
+    failedUploads,
+    pausedUploads,
+    hasUploads,
+    hasActiveUploads,
+    canResumeAnyUpload,
+    // Actions (same as vanilla useUploadActions)
+    addUpload,
+    initializeUpload,
+    updateProgress,
+    pauseUpload,
+    resumeUpload,
+    cancelUpload,
+    retryUpload,
+    removeUpload,
+    clearCompleted,
+    clearFailed,
+    clearAll,
+    checkForResumableUploads,
+    createWorker,
+    terminateWorker,
+    getUpload
+  } = (0, import_zustand.useStore)(
+    useUploadProgress,
+    (0, import_shallow.useShallow)((state) => ({
+      uploads: state.uploads,
+      totalProgress: state.totalProgress,
+      activeUploads: state.activeUploads,
+      completedUploads: state.completedUploads,
+      failedUploads: state.failedUploads,
+      pausedUploads: state.pausedUploads,
+      hasUploads: state.hasUploads,
+      hasActiveUploads: state.hasActiveUploads,
+      canResumeAnyUpload: state.canResumeAnyUpload,
+      addUpload: state.addUpload,
+      initializeUpload: state.initializeUpload,
+      updateProgress: state.updateProgress,
+      pauseUpload: state.pauseUpload,
+      resumeUpload: state.resumeUpload,
+      cancelUpload: state.cancelUpload,
+      retryUpload: state.retryUpload,
+      removeUpload: state.removeUpload,
+      clearCompleted: state.clearCompleted,
+      clearFailed: state.clearFailed,
+      clearAll: state.clearAll,
+      checkForResumableUploads: state.checkForResumableUploads,
+      createWorker: state.createWorker,
+      terminateWorker: state.terminateWorker,
+      getUpload: state.getUpload
+    }))
+  );
+  (0, import_react.useEffect)(() => {
+    checkForResumableUploads().catch(console.error);
+  }, [checkForResumableUploads]);
+  const upload = (0, import_react.useCallback)(
+    async (files, fieldnames, options) => {
       if (!files || files.length === 0) {
         throw new Error("No files provided");
       }
       if (files.length !== fieldnames.length) {
         throw new Error("Files and fieldnames length mismatch");
       }
-      if (options.maxFiles && files.length > options.maxFiles) {
-        throw new Error(`Maximum ${options.maxFiles} files allowed`);
-      }
-      const enhancedMetadata = options.metadata || [];
-      fieldnames.forEach((name, i) => {
-        if (!enhancedMetadata[i]) enhancedMetadata[i] = {};
-        enhancedMetadata[i].fieldname = name;
-        enhancedMetadata[i].size = files[i].size;
-        enhancedMetadata[i].type = files[i].type;
-      });
-      const uploadProgress = {
+      const uploadId = options.uploadId || generateSessionId();
+      addUpload({
         uploadId,
-        files: files.map((file, index) => ({
-          fileIndex: index,
-          fileName: file.name,
-          fileSize: file.size,
-          fileType: file.type,
-          progress: 0,
-          chunkIndex: 0,
-          totalChunks: Math.ceil(file.size / (CHUNK_SIZES2[file.type.split("/")[0]] || 1024 * 1024)),
-          status: "pending",
-          needsModification: false,
-          isModified: false
-        })),
-        overallProgress: 0,
-        status: "initializing",
-        startTime: Date.now(),
-        retryCount: 0,
-        maxRetries: MAX_RETRIES2,
-        metadata: enhancedMetadata
-        // store it in progress too!
-      };
-      this.uploads.set(uploadId, uploadProgress);
-      this.saveToStorage();
-      if (this.worker) {
-        this.worker.postMessage({
-          type: "upload",
-          uploadId,
-          blobArray: files,
-          filenameArray: files.map((f) => f.name),
-          ...options,
-          metadata: enhancedMetadata
-        });
-      } else {
-        console.warn("[Upload] Worker not available, upload will not proceed");
-        throw new Error("Worker not initialized");
-      }
-      return {
-        status: "success",
+        fileName: files[0]?.name || "",
+        fileSize: files[0]?.size || 0,
+        fileType: files[0]?.type || "",
+        endpoint: options.endpoint || "/upload",
+        method: options.method || "POST",
+        postData: options.postData,
+        metadata: options.metadata,
+        uploadType: options.uploadType || "file"
+      });
+      initializeUpload({
         uploadId,
-        message: "Upload initialized"
-      };
-    } catch (error) {
-      const err = error instanceof Error ? error : new Error(String(error));
-      this.config.onError?.(err);
-      return {
-        status: "error",
-        uploadId,
-        message: err.message,
-        error: err.message
-      };
-    }
-  }
-  /**
-   * Pause an active upload
-   */
-  pause(uploadId) {
-    const upload = this.uploads.get(uploadId);
-    if (!upload) return;
-    upload.status = "paused";
-    this.saveToStorage();
-    if (this.worker) {
-      this.worker.postMessage({
-        type: "pause",
-        uploadId
+        blobs: files,
+        filenameArray: files.map((f) => f.name),
+        endpoint: options.endpoint || "/upload",
+        method: options.method || "POST",
+        postData: options.postData,
+        metadata: options.metadata,
+        uploadType: options.uploadType || "file",
+        transformer: options.transformer
       });
-    }
-    this.config.onProgress?.(upload);
-  }
-  /**
-   * Resume a paused upload
-   */
-  resume(uploadId) {
-    const upload = this.uploads.get(uploadId);
-    if (!upload || upload.status !== "paused") return;
-    upload.status = "uploading";
-    this.saveToStorage();
-    if (this.worker) {
-      this.worker.postMessage({
-        type: "resume",
-        uploadId
-      });
-    }
-    this.config.onProgress?.(upload);
-  }
-  /**
-   * Cancel an upload
-   */
-  cancel(uploadId) {
-    const upload = this.uploads.get(uploadId);
-    if (!upload) return;
-    upload.status = "cancelled";
-    if (this.worker) {
-      this.worker.postMessage({
-        type: "cancel",
-        uploadId
-      });
-    }
-    this.emit("cancelled", { uploadId });
-  }
-  /**
-   * Remove upload from tracking
-   */
-  remove(uploadId) {
-    this.uploads.delete(uploadId);
-    this.saveToStorage();
-  }
-  /**
-   * Get all uploads
-   */
-  getUploads() {
-    return Array.from(this.uploads.values());
-  }
-  /**
-   * Get specific upload
-   */
-  getUpload(uploadId) {
-    return this.uploads.get(uploadId);
-  }
-  /**
-   * Event listener support
-   */
-  on(event, callback) {
-    if (!this.eventListeners.has(event)) {
-      this.eventListeners.set(event, /* @__PURE__ */ new Set());
-    }
-    this.eventListeners.get(event).add(callback);
-    return () => {
-      this.eventListeners.get(event)?.delete(callback);
-    };
-  }
-  /**
-   * Emit events
-   */
-  emit(event, data) {
-    this.eventListeners.get(event)?.forEach((callback) => {
-      callback(data);
-    });
-  }
-  /**
-   * Update upload progress
-   */
-  updateProgress(uploadId, message) {
-    const upload = this.uploads.get(uploadId);
-    if (!upload) return;
-    if (message.overallProgress !== void 0) {
-      upload.overallProgress = parseFloat(message.overallProgress);
-    }
-    if (message.status) {
-      upload.status = message.status;
-    }
-    if (message.fileIndex !== void 0 && upload.files[message.fileIndex]) {
-      const file = upload.files[message.fileIndex];
-      if (message.fileProgress) file.progress = parseFloat(message.fileProgress);
-      if (message.status) file.status = message.status;
-    }
-    this.saveToStorage();
-    this.config.onProgress?.(upload);
-  }
-  /**
-   * Handle upload completion
-   */
-  handleUploadSuccess(uploadId, message) {
-    const upload = this.uploads.get(uploadId);
-    if (!upload) return;
-    upload.status = "completed";
-    upload.overallProgress = 100;
-    upload.endTime = Date.now();
-    upload.files.forEach((file) => {
-      file.status = "completed";
-      file.progress = 100;
-    });
-    this.saveToStorage();
-    this.config.onProgress?.(upload);
-    this.config.onComplete?.({
-      status: "success",
-      uploadId,
-      message: message.message || "Upload completed",
-      data: message.data,
-      allFilesSessionId: message.allFilesSessionId
-    });
-  }
-  /**
-   * Handle upload error
-   */
-  handleUploadError(uploadId, message) {
-    const upload = this.uploads.get(uploadId);
-    if (!upload) return;
-    upload.status = "failed";
-    upload.error = message.message;
-    upload.endTime = Date.now();
-    this.saveToStorage();
-    this.config.onProgress?.(upload);
-    this.config.onError?.(new Error(message.message || "Upload failed"));
-  }
-  /**
-   * Handle token request from worker
-   */
-  async handleTokenRequest() {
-    this.emit("token_request", {});
-  }
-  /**
-   * Provide token to worker
-   */
-  provideToken(token) {
-    if (this.worker) {
-      this.worker.postMessage({
-        type: "token_response",
-        token
-      });
-    }
-  }
-  /**
-   * Save state to localStorage
-   */
-  saveToStorage() {
-    try {
-      const data = Array.from(this.uploads.entries());
-      localStorage.setItem(this.config.storageKey, JSON.stringify(data));
-    } catch (error) {
-      console.warn("Failed to save to storage:", error);
-    }
-  }
-  /**
-   * Restore state from localStorage
-   */
-  restoreFromStorage() {
-    try {
-      const data = localStorage.getItem(this.config.storageKey);
-      if (data) {
-        const uploads = JSON.parse(data);
-        uploads.forEach(([key, value]) => {
-          if (["paused", "failed"].includes(value.status)) {
-            this.uploads.set(key, value);
-          }
-        });
-      }
-    } catch (error) {
-      console.warn("Failed to restore from storage:", error);
-    }
-  }
-  /**
-   * Set worker URL dynamically (useful for consumers)
-   */
-  setWorkerUrl(url) {
-    this.config.workerUrl = url;
-    if (this.worker) {
-      this.worker.terminate();
-      this.worker = null;
-    }
-    this.initializeWorker();
-  }
-  /**
-   * Cleanup and destroy
-   */
-  destroy() {
-    if (this.worker) {
-      this.worker.terminate();
-      this.worker = null;
-    }
-    this.uploads.clear();
-    this.eventListeners.clear();
-  }
+      return uploadId;
+    },
+    [addUpload, initializeUpload]
+  );
+  return {
+    // State
+    uploads,
+    totalProgress,
+    activeUploads,
+    completedUploads,
+    failedUploads,
+    pausedUploads,
+    hasUploads,
+    hasActiveUploads,
+    canResumeAnyUpload,
+    upload,
+    addUpload,
+    initializeUpload,
+    updateProgress,
+    pauseUpload,
+    resumeUpload,
+    cancelUpload,
+    retryUpload,
+    removeUpload,
+    clearCompleted,
+    clearFailed,
+    clearAll,
+    checkForResumableUploads,
+    createWorker,
+    terminateWorker,
+    getUpload,
+    // Extra: low‑level worker termination for all
+    terminateAllWorkers: useUploadProgress.getState().terminateAllWorkers
+  };
+}
+
+// src/hooks/useUploadState.ts
+var import_zustand2 = require("zustand");
+var useUploadProgress2 = (selector) => {
+  return (0, import_zustand2.useStore)(useUploadProgress, selector);
 };
+function useUploadState(uploadId) {
+  const uploads = useUploadProgress2((state) => state.uploads);
+  const getUpload = useUploadProgress2((state) => state.getUpload);
+  const totalProgress = useUploadProgress2((state) => state.totalProgress);
+  const activeCount = useUploadProgress2((state) => state.activeUploads);
+  const currentUpload = uploadId ? getUpload(uploadId) : uploads.find((u) => u.status === "uploading");
+  return {
+    currentUpload,
+    allUploads: uploads,
+    totalProgress,
+    activeCount,
+    isActive: currentUpload?.status === "uploading",
+    isPaused: currentUpload?.status === "paused",
+    isFailed: currentUpload?.status === "failed",
+    isCompleted: currentUpload?.status === "completed"
+  };
+}
