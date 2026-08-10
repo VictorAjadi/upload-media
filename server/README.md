@@ -13,34 +13,29 @@
 - [Core Methods & Utilities](#-core-methods--utilities)
 - [Configuration Reference](#-configuration-reference)
   - [UploadEngineConfig](#uploadengineconfig)
+  - [Real-Time UIs & Background Processing (SSE)](#-real-time-uis--background-processing-sse)
   - [UploadTypeConfig](#uploadtypeconfig)
+  - [FrontendTransformerConfig](#frontendtransformerconfig)
 - [Framework Adapters](#-framework-adapters)
-  - [All 8 Adapters](#all-8-adapters)
-  - [Usage Pattern](#usage-pattern-all-adapters)
 - [Storage Providers](#-storage-providers)
   - [S3StorageAdapter (AWS S3 & Compatible)](#s3storageadapter-aws-s3--compatible)
   - [CloudinaryStorageAdapter](#cloudinarystorageadapter)
+  - [Complete Storage Adapter Comparison](#-complete-storage-adapter-comparison)
   - [LocalDiskStorageAdapter](#localdiskstorageadapter)
   - [DatabaseStorageAdapter](#databasestorageadapter)
 - [Database Repositories](#-database-repositories)
-  - [Built-In Implementations](#built-in-implementations)
-  - [Custom Repository Implementation](#custom-repository-implementation)
 - [Performance & Caching](#-performance--caching)
-  - [MongoDB Performance Cache](#mongodb-performance-cache)
-  - [Redis Hooks for Distributed Environments](#redis-hooks-for-distributed-environments)
 - [Media Serving](#-media-serving)
-  - [File Serving Middleware](#file-serving-middleware)
-  - [Features](#features-1)
-  - [Serving Dispatch Logic](#serving-dispatch-logic)
-  - [Custom Serving with Hooks](#custom-serving-with-hooks)
 - [Hooks System](#-hooks-system)
-  - [Storage Hooks](#storage-hooks)
-  - [Database Hooks](#database-hooks)
-  - [Example Implementation](#example-implementation-1)
 - [Error Handling & Rollback](#-error-handling--rollback)
-  - [System Error Registry](#system-error-registry)
 - [Testing](#-testing)
 - [Technical Specifications](#-technical-specifications)
+- [Multi-Server Deployment](#-multi-server-deployment)
+  - [Option A: DatabaseStorageAdapter (Fully Stateless)](#option-a-databasestorageadapter-fully-stateless)
+  - [Option B: S3 & Cloudinary Adapters + Sticky Sessions](#option-b-s3--cloudinary-adapters--sticky-sessions)
+  - [Option C: Shared Filesystem (EFS / NFS)](#option-c-shared-filesystem-efs--nfs)
+  - [Scaling Checklist](#scaling-checklist)
+  - [Multi-Server Orchestration: The Heartbeat Model](#-multi-server-orchestration-the-heartbeat-model)
 - [Troubleshooting](#-troubleshooting)
 
 ---
@@ -55,9 +50,11 @@ The engine is built on a **Modular Kernel** architecture. This design separates 
 
 2. **Streaming Multipart Parsing**: The engine uses a high-speed, non-blocking parser that streams incoming data and distinguishes between **Binary Chunks** (file data) and **Protocol Fields** (session IDs, chunk indexes, metadata).
 
-3. **Strict Validation Protocol**:
+3. **Strict Validation Protocol & OOM Protection**:
    - **MIME Sniffing**: Validates file content against declared MIME type, preventing malicious uploads.
    - **Resource Quotas**: Validates against `UploadTypeConfig` for total size, file count, and chunk boundaries.
+   - **Zero-Copy Disk Streaming**: Automatically flags large monolithic non-chunked streams (>50MB) and natively pipes them directly to an OS scratch disk layer. Bypasses the V8 Heap memory buffer entirely, ensuring stability during enterprise use.
+   - **Stream-Parser Promise Tracking**: Implements a strict `pendingPromises` tracker against the event loop to prevent premature chunk termination, guaranteeing reliable `multipart/form-data` parsing in distributed edge topologies.
 
 4. **Multi-Stage Persistence**:
    - **Staging**: Intermediate chunks written to temporary or "hot" storage.
@@ -104,9 +101,50 @@ const database = new MongooseRepository({
 
 // ── Engine ────────────────────────────────────────
 const engine = new UploadEngine({
-  database,
+  // ── Core Persistence ──
   storages: { s3, local },
   defaultStorage: 's3',
+  database,
+  
+  // ── Performance & Scaling ──
+  cache: redisCacheAdapter,             // Optional: Key-value cache for DB lookups
+  cacheTtlSeconds: 300,                 // TTL for cached records (default: 300)
+  autoRespond: true,                    // Let adapter handle HTTP framework res (default: true)
+  hmacSecret: process.env.UPLOAD_HMAC,  // Secret for HMAC-signing stateless chunk upload tokens
+  
+  // ── Quotas & Hard Limits ──
+  maxTotalSize: 5 * 1024 * 1024 * 1024, // Universal 5GB cap for the entire multipart payload
+  maxFiles: 10,                         // Prevent abuse via massive file batch queues
+  maxFieldSize: 1024 * 1024,            // Ensure form string properties don't exceed 1MB
+  staleUploadRetentionMs: 86400000,     // 24h cleanup cycle for abandoned chunk sessions
+  globalLimits: { video: 5e9 },         // Fallback fallback bounds
+  globalChunkLimits: { video: 50e6 },   // Set hard multipart chunk fragmentation boundaries
+  
+  // ── Enterprise Processing & OOM Protection ──
+  // Note: MultipartParser natively protects against OOMs by automatically 
+  // piping streams >50MB direct to OS temp disks (Zero-Copy Transfer).
+  mediaProcessor: {
+    tempDir: '/var/tmp/upload-media', // Custom OS swap space location
+    maxConcurrency: 2, // Limit concurrent FFmpeg pipelines
+    timeoutMs: 0,      // Disable limits to allow infinite transcode durations
+  },
+
+  // ── Event Hooks ──
+  onProcessingStart: async (fileId, sessionId, ctx) => {
+    console.log(`[Background] FFmpeg detached for ${fileId}`);
+  },
+  onVariantComplete: async (variantFile, parentFileId) => {
+    console.log(`[Stream] Finished resolving variant: ${variantFile.url}`);
+  },
+  onUploadComplete: async (file) => {
+    console.log(`[Ready] Upload pipeline completed for ${file.id}`);
+  },
+  onError: (error, context) => {
+    console.error(`[Engine] Fatal processing error:`, error, context);
+  },
+
+  // ── Route & Variant Archetypes ──
+  defaultUploadType: 'avatar',
   uploadTypes: {
     avatar: {
       allowedKinds: ['image'],
@@ -223,8 +261,87 @@ interface UploadResult {
 | `maxTotalSize` | `number` | No | - | Maximum cumulative size of all files in an upload request. |
 | `staleUploadRetentionMs`| `number` | No | `86,400,000` (24h) | Cumulative TTL duration before partial chunk data is deleted. |
 | `mediaProcessor` | `MediaProcessorOptions` | No | - | Options for parallel and customized FFmpeg/Sharp media processing. |
+| `onProcessingStart` | `(fileId: string, sessionId: string, context: any) => void \| Promise<void>` | No | - | Fired dynamically exactly when a heavy background task (like FFmpeg) is detached into the background loops. |
+| `onVariantComplete` | `(variantRecord: FileRecord, parentFileId: string) => void \| Promise<void>` | No | - | Real-time hook emitting sub-renders (e.g. 720p, 1080p, thumbnails) right as they finish, before full file completion. |
 | `onUploadComplete` | `(file: FileRecord) => void \| Promise<void>` | No | - | Callback triggered immediately after complete finalization. |
 | `onError` | `(err: Error, context: { uploadType?: string, sessionId?: string }) => void` | No | - | Centralized exception monitoring callback handler. |
+
+---
+
+### 🟢 Real-Time UIs & Background Processing (SSE)
+
+When processing time-intensive assets like multi-quality videos, you can use `@upload-media`'s event hooks alongside Server-Sent Events (SSE) or WebSockets to instantly drop the frontend UI into a responsive asynchronous tracking interface while rendering completes in the background.
+
+```typescript
+const sseClients = new Map(); // Memory map tying File IDs to open HTTP Streams
+
+// 1. Establish an SSE endpoint on your framework
+app.get('/api/events/:fileId', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  
+  sseClients.set(req.params.fileId, res);
+});
+
+// 2. Configure the Engine to stream FFmpeg hook events to the UI
+const engine = new UploadEngine({
+  database, storages, defaultStorage: 's3',
+  
+  onProcessingStart: (fileId, sessionId, context) => {
+    // Alert the client immediately that massive transcoding has natively detached
+    const client = sseClients.get(fileId);
+    if (client) {
+      client.write(`event: media_processing_started\n`);
+      client.write(`data: {"message": "FFmpeg transcoding Initialized"}\n\n`);
+    }
+  },
+  
+  onVariantComplete: (variantRecord, parentFileId) => {
+    // Stream live sub-variant URLs (e.g. 1080p, 480p, thumbnails) as they individually complete
+    const client = sseClients.get(parentFileId);
+    if (client) {
+      client.write(`event: media_variant_ready\n`);
+      client.write(`data: {"quality":"${variantRecord.metadata?.quality}", "url":"${variantRecord.url}"}\n\n`);
+    }
+  },
+  
+  onUploadComplete: (file) => {
+    if (file.metadata?.isVariant) return; // Prevent closing the socket on sub-variant ticks
+    const client = sseClients.get(file.id);
+    if(client) {
+        client.write(`event: media_processing_finished\n`);
+        client.write(`data: ${JSON.stringify({ final: file.url })}\n\n`);
+        
+        client.write(`event: close\ndata: {}\n\n`); // Clean up frontend DOM Listeners
+        client.end();
+        sseClients.delete(file.id); // Flush reference memory
+    }
+  }
+});
+```
+
+---
+
+### 💓 Enterprise Architecture: The Heartbeat Model
+
+When processing large media files in enterprise environments, relying on a basic "I'm alive" process ping is insufficient. `@upload-media` enables **true liveness detection** by emitting deep telemetry (frames and bytes processed) through the `onProgress` and `onVariantComplete` hooks. 
+
+This model allows you to outsource process orchestration and liveness monitoring to infrastructure like Kubernetes, keeping your Node.js application state clean. However, a production-grade heartbeat implementation requires handling several architectural edge cases:
+
+#### 1. Decoupled Queues and Idempotency
+If a container orchestrator (like Kubernetes) rotates a pod due to a perceived freeze, the pod will terminate ungracefully. 
+* **Requirement:** State must be managed by an external message broker (e.g., BullMQ, RabbitMQ). When a pod is rotated, the broker should detect the disconnected consumer and re-queue the task idempotently to another worker node, freely overwriting partial state.
+
+#### 2. False Positives & Orchestrator Timeouts
+* **Requirement:** FFmpeg can temporarily hang during single-threaded operations (like parsing massive `moov` atoms or two-pass encoding sweeps). Your orchestrator's liveness probe timeout (e.g., 5 minutes) must be load-tested and dynamically configured based on expected payload sizes, preventing false-positive pod terminations.
+
+#### 3. Telemetry Throttling
+* **Requirement:** Processing hundreds of frames per second on small files can overwhelm telemetry platforms (e.g., Datadog, Prometheus). Ensure your `onProgress` hook is debounced or batched, emitting heartbeat metrics to the orchestrator layer (like Redis) no more than once every 3-5 seconds.
+
+#### 4. Zombie Process Mitigation (PID 1)
+* **Requirement:** Terminating a Node application will not universally kill detached or spawned FFmpeg processes. Ensure you trap `SIGTERM` signals in your application to aggressively terminate running `spawn()` jobs, and utilize an init system like `dumb-init` or `tini` as your Docker entrypoint to reap orphaned child processes.
 
 ---
 
@@ -238,7 +355,7 @@ Allows standard control over concurrent jobs running `fluent-ffmpeg` and `sharp`
 | `ffmpegPath` | `string` | `(auto)` | Specific location path config to FFmpeg binary executor. |
 | `ffprobePath` | `string` | `(auto)` | Specific location path config to FFprobe binary executor. |
 | `maxConcurrency` | `number` | `2` | Semaphore concurrent task processing limit for FFmpeg pipelines. |
-| `timeoutMs` | `number` | `600,000` (10m) | Absolute timeout limit per media variant generation action. |
+| `timeoutMs` | `number` | `600,000` (10m) | Absolute timeout limit per media variant generation action. Provide `0` to disable timeouts entirely for massive uninterrupted workflows. |
 
 ---
 
@@ -755,6 +872,19 @@ interface CloudinaryStorageOptions {
 
 ---
 
+## 🏢 Complete Storage Adapter Comparison
+
+| Feature | S3 | Cloudinary | Local Disk | Database |
+|---------|-----|-----------|-----------|----------|
+| **Protocol** | S3 Multipart API | Cloudinary v2 API | Filesystem | DB Binary Storage |
+| **Cost Model** | Pay for storage | Pay per image/video ops | Free (hardware) | Manual |
+| **Transformations** | Via Lambda/API | Built-in v2 API | Manual processing | Manual processing |
+| **Best For** | Large scale, cost-optimized | Media first, instant transform | Dev/testing | Medium to Large files, backup |
+| **Setup Complexity** | Medium | Low | Trivial | Low |
+| **Client Injection** | ✅ Yes (S3Client) | ✅ Yes (v2 instance) | No | No |
+
+---
+
 ### LocalDiskStorageAdapter
 
 Perfect for development and small-scale deployments.
@@ -1080,6 +1210,201 @@ expect(result.status).toBe('success');
 
 ---
 
+## 🌐 Multi-Server Deployment
+
+When scaling horizontally (e.g., multiple EC2 instances behind an ALB), the core challenge is: **the client uploads Chunk 1 to Instance A, but the load balancer sends Chunk 5 to Instance B**. The library already handles this — you just need to pick the right storage adapter.
+
+### Option A: DatabaseStorageAdapter (Fully Stateless)
+
+**No sticky sessions. No shared disks. Any instance can handle any chunk.**
+
+This is the recommended approach. Every chunk is written directly to your centralized database as a binary document. When the final chunk arrives at *any* instance, that instance:
+
+1. Queries the shared DB for all chunks (via `assembleChunksToPath`)
+2. Streams them to a temp file on local disk (`/tmp`)
+3. Runs `MediaProcessor` (FFmpeg/Sharp) on the assembled file
+4. Writes processed variants back to the DB via `putStream`
+5. Cleans up the local temp file
+
+```
+       ┌─────────┐
+       │  Client  │
+       └────┬─────┘
+            │  Chunks land on random instances
+    ┌───────┼───────┐
+    ▼       ▼       ▼
+┌──────┐┌──────┐┌──────┐
+│EC2 #1││EC2 #2││EC2 #3│  ← All stateless
+└──┬───┘└──┬───┘└──┬───┘
+   │       │       │
+   └───────┼───────┘
+           ▼
+   ┌───────────────┐
+   │ Shared Database│  ← Chunks stored as rows
+   │  (Mongo/PG)   │
+   └───────────────┘
+```
+
+```typescript
+import { DatabaseStorageAdapter, MongooseRepository } from 'upload-media-server';
+
+const database = new MongooseRepository({
+  mongooseConnection: mongoose.connection
+});
+
+const storage = new DatabaseStorageAdapter({ database });
+
+const engine = new UploadEngine({
+  database,
+  storages: { db: storage },
+  defaultStorage: 'db',
+  uploadTypes: {
+    video: {
+      allowedKinds: ['video'],
+      limits: { video: 500 * 1024 * 1024 },
+      thumbnails: true
+    }
+  }
+});
+```
+
+**Why this works out of the box:**
+- `writeChunk()` writes directly to the shared DB — no local state
+- `assembleChunksToPath()` pulls all chunks from DB → streams to a local temp file for FFmpeg
+- `putStream()` re-chunks processed variants back into the DB (respecting the original `chunkSize`)
+- `finalize()` simply returns the `fileId` as the storage reference — no file "move" needed
+- `ChunkReadStream` serves files directly from DB with range-request and prefetch support
+
+### Option B: S3 & Cloudinary Adapters + Sticky Sessions
+
+The `S3StorageAdapter` and `CloudinaryStorageAdapter` both maintain in-memory state during an active upload:
+- **S3** caches `MultipartState` and small chunks in memory until they hit the 5MB part limit.
+- **Cloudinary** keeps an active `upload_large_stream` connection open in memory across chunks.
+
+Because of this local state, **all chunks for a given file must hit the same instance**.
+
+You must configure your API Gateway or Load Balancer to route requests from the same client/session to the same EC2 instance. Without this, chunks will bounce between instances, leading to `400 Bad Request` or lost uploads.
+
+**AWS Application Load Balancer (ALB):**
+- Target Group → Attributes → Enable **Stickiness** (application-based cookie)
+
+**Nginx (Using `ip_hash`):**
+Ensures all requests from the same client IP always route to the same upstream server.
+```nginx
+upstream upload_backend {
+    ip_hash;  # Crucial for routing chunks to the same instance!
+    server ec2-instance-1:3000;
+    server ec2-instance-2:3000;
+    server ec2-instance-3:3000;
+}
+
+server {
+    location /api/upload {
+        proxy_pass http://upload_backend;
+        client_max_body_size 0; # Disable Nginx upload payload limits
+    }
+}
+```
+
+**HAProxy (Using sticky cookies):**
+```haproxy
+backend upload_backend
+    balance roundrobin
+    cookie SRVNAME insert
+    server inst1 ec2-instance-1:3000 cookie S1 check
+    server inst2 ec2-instance-2:3000 cookie S2 check
+```
+
+```typescript
+const s3 = new S3StorageAdapter({
+  bucket: 'prod-uploads',
+  region: 'us-east-1'
+});
+
+const engine = new UploadEngine({
+  database,
+  storages: { s3 },
+  defaultStorage: 's3',
+  uploadTypes: { /* ... */ }
+});
+```
+
+**Trade-offs:**
+- ✅ Files stream directly to the Cloud (S3/Cloudinary) — bypassing database binary storage.
+- ✅ Processed media variants stream back natively via `putStream`.
+- ⚠️ Requires sticky sessions — if an instance reboots mid-upload, that upload is lost.
+- ⚠️ Holds raw chunks in memory (in `partCache` or `chunkCache`) until the final assembly — monitor process memory usage.
+
+### Option C: Shared Filesystem (EFS / NFS)
+
+Mount a network filesystem at the same path on every instance and use `LocalDiskStorageAdapter`:
+
+```typescript
+const local = new LocalDiskStorageAdapter({
+  rootDir: '/mnt/efs/uploads',           // EFS mount point
+  publicBaseUrl: 'https://cdn.example.com'
+});
+
+const engine = new UploadEngine({
+  database,
+  storages: { local },
+  defaultStorage: 'local',
+  uploadTypes: { /* ... */ }
+});
+```
+
+**Trade-offs:**
+- ✅ No sticky sessions needed — any instance reads/writes the same directory
+- ✅ FFmpeg processes files in-place (no re-download step)
+- ⚠️ EFS throughput can bottleneck on large concurrent uploads
+- ⚠️ Additional AWS infrastructure cost
+
+### Temp Directory Management (Crucial for EC2 / Docker)
+
+Behind the scenes, the engine uses the host's temporary directory (`os.tmpdir()`) to assemble chunks and process media (via `fluent-ffmpeg` and `sharp`) **before** finally uploading them to your configured storage provider (S3, Cloudinary, or Database). 
+
+If you are deploying horizontally scaling instances (like AWS EC2 or ECS), you **must** ensure each instance has sufficient local disk space attached (e.g. an EBS volume) to handle concurrently processing large video variants. 
+
+If your default `/tmp` partition is too small, you can override the temporary directory for both the storage adapter and the media processor:
+
+```typescript
+const TEMP_VOLUME = '/mnt/ebs/upload-temp';
+
+// 1. Configure the Storage Adapter to buffer assembled chunks here
+const storage = new DatabaseStorageAdapter({ 
+  database, 
+  tempDir: TEMP_VOLUME 
+});
+// (Also available on S3StorageAdapter and CloudinaryStorageAdapter)
+
+const engine = new UploadEngine({
+  database,
+  storages: { db: storage },
+  defaultStorage: 'db',
+  
+  // 2. Configure the MediaProcessor to write FFmpeg variant outputs here
+  mediaProcessor: {
+    tempDir: TEMP_VOLUME,
+    maxConcurrency: 2, // Important: Limit parallel FFmpeg tasks per instance
+  },
+  
+  uploadTypes: { /* ... */ }
+});
+```
+
+### Scaling Checklist
+
+| Concern | What to configure |
+| :--- | :--- |
+| **Database** | Must be centralized (shared MongoDB/PostgreSQL) so all instances see the same `FileRecord` and chunk data. |
+| **Storage Temp Space** | Provision sufficient EBS volume space for your EC2 instances and pass the mount path to `tempDir` on both the adapter and `UploadEngine` options. |
+| **`mediaProcessor.maxConcurrency`** | Tune per instance to avoid CPU/memory oversubscription. E.g., for a 2-vCPU instance, set to `1` or `2`. |
+| **`staleUploadRetentionMs`** | Set high enough to survive slow uploads across instances (default works for most cases). |
+| **Cache layer** | Add `@mongoose-performance-cache` or Redis hooks to reduce DB round-trips for chunk lookups. |
+| **Health checks** | Exclude `/api/upload` from health-check paths to avoid load balancer interference with long uploads. |
+
+---
+
 ## 🤔 Troubleshooting
 
 | Symptom | Probable Cause | Fix |
@@ -1092,20 +1417,6 @@ expect(result.status).toBe('success');
 | **S3 UploadPart failed** | Part size < 5MB | Increase minPartSize or ensure buffering works. |
 | **Cloudinary 401 error** | Invalid credentials | Check API key/secret and cloud name. |
 | **Memory exhaustion** | Large files streaming | Set `quality: 'low'` or increase Node memory limit. |
-
----
-
-## 🏢 Complete Storage Adapter Comparison
-
-| Feature | S3 | Cloudinary | Local Disk | Database |
-|---------|-----|-----------|-----------|----------|
-| **Protocol** | S3 Multipart API | Cloudinary v2 API | Filesystem | DB Binary Storage |
-| **Cost Model** | Pay for storage | Pay per image/video ops | Free (hardware) | Included with DB |
-| **CDN** | Requires CloudFront | Built-in CDN | Manual | Manual |
-| **Transformations** | Via Lambda/API | Built-in v2 API | Manual processing | Manual processing |
-| **Best For** | Large scale, cost-optimized | Media first, instant transform | Dev/testing | Medium to Large files, backup |
-| **Setup Complexity** | Medium | Low | Trivial | Low |
-| **Client Injection** | ✅ Yes (S3Client) | ✅ Yes (v2 instance) | No | No |
 
 ---
 

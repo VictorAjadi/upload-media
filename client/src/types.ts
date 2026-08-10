@@ -87,6 +87,7 @@ export interface UploadProgress {
   files: FileUploadItem[];
   overallProgress: number;
   status: UploadStatus;
+  responseData?: any;
   speed?: number;
   timeRemaining?: number;
   startTime: number;
@@ -105,6 +106,7 @@ export interface UploadProgress {
   postData?: Record<string, any>;
   metadata?: Array<FileMetadata>;
   uploadType?: string;
+  mockNetworkDropRate?: number;
 }
 
 export interface UploadOptions {
@@ -119,6 +121,7 @@ export interface UploadOptions {
   metadata?: Array<FileMetadata>;
   // Server-side transformation config
   transformer?: TransformerConfig;
+  mockNetworkDropRate?: number;
 }
 
 export interface UpdateProgressParams {

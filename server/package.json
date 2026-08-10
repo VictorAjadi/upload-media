@@ -1,14 +1,16 @@
 {
   "name": "upload-media-server",
-  "version": "1.1.0",
+  "version": "1.2.3",
   "description": "Framework-agnostic robust media upload backend",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --external sharp --external fluent-ffmpeg --external mongoose --external busboy --external ffmpeg-static --external @ffmpeg-installer/ffmpeg --external @ffprobe-installer/ffprobe",
-    "dev": "tsup src/index.ts --format cjs,esm --dts --watch --external sharp --external fluent-ffmpeg --external mongoose --external busboy --external ffmpeg-static --external @ffmpeg-installer/ffmpeg --external @ffprobe-installer/ffprobe",
-    "postinstall": "node scripts/postinstall.js"
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch --external sharp --external fluent-ffmpeg --external mongoose --external busboy --external ffmpeg-static --external @ffmpeg-installer/ffmpeg --external @ffprobe-installer/ffprobe"
   },
   "homepage": "https://github.com/VictorAjadi/upload-media",
   "repository": {

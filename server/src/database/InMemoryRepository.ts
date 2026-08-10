@@ -98,6 +98,13 @@ export class InMemoryRepository implements MetadataRepository {
     this.chunks.set(key, chunk.data);
   }
 
+  async createChunks(chunks: ChunkRecord[]): Promise<void> {
+    for (const chunk of chunks) {
+      const key = `${chunk.fileId}:${chunk.chunkNumber}`;
+      this.chunks.set(key, chunk.data);
+    }
+  }
+
   async getChunk(fileId: string, chunkNumber: number): Promise<Buffer | null> {
     const key = `${fileId}:${chunkNumber}`;
     return this.chunks.get(key) || null;

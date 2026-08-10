@@ -7,7 +7,7 @@ const {
   createExpressFileServingMiddleware,
   DatabaseStorageAdapter,
   MongooseRepository
-} = require('@upload-media/server');
+} = require('upload-media-server');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 
 const app = express();

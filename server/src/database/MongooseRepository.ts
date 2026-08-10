@@ -314,6 +314,40 @@ export class MongooseRepository implements MetadataRepository {
     }
   }
 
+  async createChunks(chunks: ChunkRecord[]): Promise<void> {
+    const ctx = this.createHookContext();
+    const processedChunks: ChunkRecord[] = [];
+
+    for (const chunk of chunks) {
+      let chunkToStore = chunk;
+      if (this.hooks?.beforeCreateChunk) {
+        chunkToStore = await this.hooks.beforeCreateChunk(chunk, ctx);
+      }
+      processedChunks.push(chunkToStore);
+    }
+
+    const bulkOps = processedChunks.map((chunk) => ({
+      updateOne: {
+        filter: { fileId: chunk.fileId, chunkNumber: chunk.chunkNumber },
+        update: {
+          $set: chunk,
+          $setOnInsert: { createdAt: new Date() },
+        },
+        upsert: true,
+      },
+    }));
+
+    if (bulkOps.length > 0) {
+      await this.chunkModel.bulkWrite(bulkOps, { ordered: false });
+    }
+
+    if (this.hooks?.afterCreateChunk) {
+      for (const chunk of processedChunks) {
+        await this.hooks.afterCreateChunk(chunk, ctx);
+      }
+    }
+  }
+
   async getChunk(fileId: string, chunkNumber: number): Promise<Buffer | null> {
     const ctx = this.createHookContext();
 

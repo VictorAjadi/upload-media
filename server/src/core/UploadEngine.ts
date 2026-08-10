@@ -679,7 +679,8 @@ export class UploadEngine {
       const buf = await storage.readChunk(fileId, i, ctx);
       chunks.push(ensureBuffer(buf));
     }
-    return await this.mediaProcessor.assembleChunksToDisk(chunks, ext);
+    const fullBuffer = Buffer.concat(chunks);
+    return await this.mediaProcessor.writeTempFile(fullBuffer, ext);
   }
 
   // ── Media processing dispatch (path-based) ────────────────────────────────
@@ -720,7 +721,10 @@ export class UploadEngine {
         codec: transformer.codec,
         generateThumbnail: transformer.generateThumbnail !== false,
         thumbnailTimeSeconds: transformer.thumbnailTimeSeconds,
+        onProgress: (progress) => this.config.onProgress?.({ ...progress, fileId: inputPath }),
       };
+      
+      this.config.onProcessingStart?.(inputPath, 'session_native', { type: 'video' });
       return await this.mediaProcessor.processVideoFromPath(inputPath, mimetype, filename, cfg);
     }
 
@@ -732,7 +736,10 @@ export class UploadEngine {
         startTime: transformer.startTime,
         endTime: transformer.endTime,
         audioBitrate: transformer.audioBitrate,
+        onProgress: (progress) => this.config.onProgress?.({ ...progress, fileId: inputPath }),
       };
+      
+      this.config.onProcessingStart?.(inputPath, 'session_native', { type: 'audio' });
       return await this.mediaProcessor.processAudioFromPath(inputPath, mimetype, filename, cfg);
     }
 

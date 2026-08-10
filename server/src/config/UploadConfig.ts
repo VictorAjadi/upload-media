@@ -38,7 +38,7 @@ export function resolveUploadConfig(config: UploadEngineConfig): ResolvedUploadE
   if (!config.database) {
     throw new ConfigValidationError(
       'a `database` (MetadataRepository) is required. Use one of the built-in adapters ' +
-        '(MongooseRepository, SQLRepository, InMemoryRepository) or implement the interface yourself.'
+      '(MongooseRepository, SQLRepository, InMemoryRepository) or implement the interface yourself.'
     );
   }
 
@@ -51,7 +51,7 @@ export function resolveUploadConfig(config: UploadEngineConfig): ResolvedUploadE
   if (!config.defaultStorage || !config.storages[config.defaultStorage]) {
     throw new ConfigValidationError(
       `\`defaultStorage\` ("${config.defaultStorage}") must reference a key present in \`storages\`. ` +
-        `Available: ${Object.keys(config.storages).join(', ') || '(none)'}`
+      `Available: ${Object.keys(config.storages).join(', ') || '(none)'}`
     );
   }
 
@@ -83,6 +83,9 @@ export function resolveUploadConfig(config: UploadEngineConfig): ResolvedUploadE
     maxTotalSize: config.maxTotalSize ?? 500 * 1024 * 1024, // 500MB
     onProgress: config.onProgress,
     autoRespond: config.autoRespond ?? true,
+    tokenSecret: config.tokenSecret,
+    tokenTtlSeconds: config.tokenTtlSeconds ?? 3600,
+    janitorIntervalMs: config.janitorIntervalMs ?? 24 * 60 * 60 * 1000,
   };
 }
 

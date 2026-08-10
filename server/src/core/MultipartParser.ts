@@ -84,6 +84,7 @@ export interface ParsedFile {
   detectedMimetype?: string;
   buffer: Buffer;
   size: number;
+  tempFilePath?: string;
 }
 
 export interface ParsedMultipart {
@@ -129,6 +130,12 @@ export class MultipartParser {
       const files: ParsedFile[] = [];
       let settled = false;
       let totalSize = 0;
+      const pendingPromises: Promise<any>[] = [];
+      
+      const contentLength = parseInt((req.headers as any)['content-length'] || '0', 10);
+      const isChunked = !!((req.headers as any)['content-range'] || req.query?.isChunked);
+      const SAFE_THRESHOLD_50MB = 50 * 1024 * 1024;
+      const shouldDumpToDisk = contentLength > SAFE_THRESHOLD_50MB || isChunked === false;
 
       const fail = (err: Error) => {
         if (settled) return;
@@ -151,8 +158,9 @@ export class MultipartParser {
         return fail(error instanceof Error ? error : new Error(String(error)));
       }
 
-      bb.on('field', async (name: string, value: string) => {
-        try {
+      bb.on('field', (name: string, value: string) => {
+        pendingPromises.push((async () => {
+          try {
           // Validate field
           const rule = options.fieldValidation?.[name];
           if (rule) {
@@ -175,6 +183,7 @@ export class MultipartParser {
         } catch (error) {
           fail(error instanceof Error ? error : new Error(String(error)));
         }
+        })());
       });
 
       bb.on('file', (fieldname: string, fileStream: Readable, info: any) => {
@@ -186,19 +195,48 @@ export class MultipartParser {
           encoding: info.encoding,
         };
 
-        const chunks: Buffer[] = [];
+        let fileResolve: () => void;
+        let fileReject: (err: any) => void;
+        pendingPromises.push(new Promise<void>((r, rej) => {
+           fileResolve = r;
+           fileReject = rej;
+        }));
+
         let size = 0;
         let truncated = false;
+        
+        let chunkBuffers: Buffer[] = [];
+        let magicBytesBuffer = Buffer.alloc(0);
+        let diskStream: NodeJS.WritableStream | null = null;
+        let tempFilePath: string | undefined = undefined;
+
+        if (shouldDumpToDisk) {
+           const os = require('os');
+           const path = require('path');
+           const fs = require('fs');
+           tempFilePath = path.join(os.tmpdir(), `upload_parse_${Date.now()}_${Math.random().toString(36).substring(2)}.tmp`);
+           diskStream = fs.createWriteStream(tempFilePath);
+        }
 
         fileStream.on('data', (chunk: Buffer) => {
           size += chunk.length;
           totalSize += chunk.length;
 
-          // ENSURE chunk is a proper Buffer before pushing
           const safeChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-          chunks.push(safeChunk);
+          
+          if (magicBytesBuffer.length < 4100) {
+             magicBytesBuffer = Buffer.concat([magicBytesBuffer, safeChunk]);
+          }
+          
+          if (diskStream) {
+             if (!diskStream.write(safeChunk)) {
+                 fileStream.pause();
+                 diskStream.once('drain', () => fileStream.resume());
+             }
+          } else {
+             chunkBuffers.push(safeChunk);
+          }
 
-          // Progress callback
           options.onProgress?.(totalSize, options.maxTotalSize ?? Infinity);
         });
 
@@ -208,33 +246,34 @@ export class MultipartParser {
 
         fileStream.on('end', async () => {
           try {
+            if (diskStream) {
+               await new Promise<void>((res) => diskStream!.end(() => res()));
+            }
+          
             if (truncated) {
+              if (tempFilePath) require('fs').unlink(tempFilePath, ()=>{});
               fail(new Error(`File "${fieldname}" exceeded the maximum allowed size`));
               return;
             }
 
             fileInfo.size = size;
 
-            // Ensure we create a proper Buffer from all chunks
-            const buffer = Buffer.concat(chunks, size);
+            const finalBuffer = diskStream ? Buffer.alloc(0) : Buffer.concat(chunkBuffers, size);
+            const magicCheckBuffer = diskStream ? magicBytesBuffer.subarray(0, 4100) : finalBuffer;
 
-            // Detect magic bytes (actual file type)
             const fileRule = options.fileValidation?.[fieldname];
             const wildcardRule = options.fileValidation?.['.*'];
 
-            // Always detect magic bytes if ANY matching rule wants it
             if ((fileRule?.detectMagicBytes) || (wildcardRule?.detectMagicBytes)) {
-              fileInfo.detectedMimetype = this.detectMimeType(buffer);
+              fileInfo.detectedMimetype = this.detectMimeType(magicCheckBuffer);
             }
 
-            // Validate file - apply specific rule first, then wildcard
             if (fileRule) {
-              this.validateFile(fieldname, fileInfo, buffer, fileRule);
+              this.validateFile(fieldname, fileInfo, magicCheckBuffer, fileRule);
             } else if (wildcardRule) {
-              this.validateFile(fieldname, fileInfo, buffer, wildcardRule);
+              this.validateFile(fieldname, fileInfo, magicCheckBuffer, wildcardRule);
             }
 
-            // Hook
             if (options.hooks?.onFileParsed) {
               await options.hooks.onFileParsed(
                 fieldname,
@@ -250,25 +289,33 @@ export class MultipartParser {
               filename: fileInfo.filename,
               mimetype: fileInfo.mimetype,
               detectedMimetype: fileInfo.detectedMimetype,
-              buffer,
+              buffer: finalBuffer,
               size,
+              tempFilePath,
             });
+            fileResolve();
           } catch (error) {
+            fileReject(error);
             fail(error instanceof Error ? error : new Error(String(error)));
           }
         });
 
-        fileStream.on('error', fail);
+        fileStream.on('error', (err) => {
+           fileReject!(err);
+           fail(err);
+        });
       });
 
       bb.on('error', fail);
       bb.on('finish', () => {
-        if (settled) return;
-        settled = true;
-        options.hooks?.afterParseComplete?.(Object.keys(fields).length, files.length, {
-          timestamp: Date.now(),
-        });
-        resolve({ fields, files });
+        Promise.all(pendingPromises).then(() => {
+           if (settled) return;
+           settled = true;
+           options.hooks?.afterParseComplete?.(Object.keys(fields).length, files.length, {
+             timestamp: Date.now(),
+           });
+           resolve({ fields, files });
+        }).catch(fail);
       });
 
       req.stream.on('error', fail);

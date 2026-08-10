@@ -139,15 +139,19 @@ export function createKoaFileServingMiddleware(
 
     const rangeHeader = ctx.headers.range;
     let startByte: number | undefined;
+    let endByte: number | undefined;
 
     if (rangeHeader) {
       const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
       if (match) {
         startByte = parseInt(match[1], 10);
+        if (match[2]) {
+          endByte = parseInt(match[2], 10);
+        }
       }
     }
 
     const normalizedRes = new KoaNormalizedResponse(ctx);
-    await handler.serveFile(ref, normalizedRes, startByte);
+    await handler.serveFile(ref, normalizedRes, startByte, endByte);
   };
 }

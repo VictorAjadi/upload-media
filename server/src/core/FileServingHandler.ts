@@ -60,6 +60,12 @@ export class FileServingHandler {
                 return;
             }
 
+            if (!fileRecord.isComplete) {
+                res.status(423);
+                res.json({ error: 'File is locked because upload or verification is not yet completed' });
+                return;
+            }
+
             switch (fileRecord.storageProvider) {
                 case 'database':
                     await this.serveFromDatabase(fileRecord, res, startByte, endByte);

@@ -114,22 +114,8 @@ class ElysiaNormalizedResponse
       this.headers['Content-Type'] ||
       'application/octet-stream';
 
-    return new Promise((resolve, reject) => {
-      const chunks: Buffer[] = [];
-
-      stream.on('data', (chunk) =>
-        chunks.push(chunk)
-      );
-
-      stream.on('error', reject);
-
-      stream.on('end', () => {
-        this.body =
-          Buffer.concat(chunks);
-
-        resolve();
-      });
-    });
+    // Zero-Copy Content Delivery: convert Node.js Readable to Web ReadableStream
+    this.body = Readable.toWeb(stream);
   }
 
   end(): void {

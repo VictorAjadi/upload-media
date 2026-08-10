@@ -7,7 +7,7 @@ import {
     useUploadActions,
     useUploadProgress,
     setUploadMediaConfig,
-} from '@upload-media/client'
+} from 'upload-media-client'
 
 // ─── DOM Elements ──────────────────────────────────────────────────────────
 
@@ -21,6 +21,9 @@ const uploadList = document.getElementById('uploadList');
 const dropZone = document.getElementById('dropZone');
 const gallery = document.getElementById('gallery');
 const galleryContent = document.getElementById('galleryContent');
+const simulateDropsCheckbox = document.getElementById('simulateDropsCheckbox');
+
+const getMockDropRate = () => simulateDropsCheckbox && simulateDropsCheckbox.checked ? 0.4 : 0;
 
 // ─── Store Actions ──────────────────────────────────────────────────────────
 
@@ -81,6 +84,7 @@ uploadBtn.addEventListener('click', () => {
         filenameArray: files.map(f => f.name),
         endpoint: `http://localhost:3000/api/upload?uploadType=${uploadType}`,
         method: 'POST',
+        mockNetworkDropRate: getMockDropRate(),
         metadata: {
             uploadType: uploadType,
             timestamp: new Date().toISOString()
@@ -172,6 +176,7 @@ uploadFieldsBtn.addEventListener('click', () => {
         filenameArray: files.map(f => f.name),
         endpoint: 'http://localhost:3000/api/upload?uploadType=video',
         method: 'POST',
+        mockNetworkDropRate: getMockDropRate(),
         postData: {
             caption: 'This is a test post with image and video',
             tags: ['test', 'upload', 'premium', 'multi-field']
@@ -237,6 +242,7 @@ uploadTransBtn.addEventListener('click', () => {
         filenameArray: [file.name],
         endpoint: `http://localhost:3000/api/upload?uploadType=${uploadType}`,
         method: 'POST',
+        mockNetworkDropRate: getMockDropRate(),
         transformer,
         metadata: {
             transformed: true,
@@ -307,6 +313,7 @@ uploadMultiBtn.addEventListener('click', () => {
         filenameArray: [file.name],
         endpoint: `http://localhost:3000/api/upload?uploadType=${uploadType}`,
         method: 'POST',
+        mockNetworkDropRate: getMockDropRate(),
         postData: {
             title: 'My Media',
             description: 'A great upload'

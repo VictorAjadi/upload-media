@@ -65,6 +65,7 @@ export interface VideoProcessingConfig {
   codec?: string;
   generateThumbnail?: boolean;
   thumbnailTimeSeconds?: number;
+  onProgress?: (progress: any) => void;
 }
 
 export interface AudioProcessingConfig {
@@ -75,6 +76,7 @@ export interface AudioProcessingConfig {
   startTime?: number;
   endTime?: number;
   audioBitrate?: string;
+  onProgress?: (progress: any) => void;
 }
 
 export interface ProcessingResult {
@@ -88,6 +90,15 @@ export interface ProcessingResult {
   mimeType: string;
   /** File extension without dot */
   extension: string;
+}
+
+export interface ProcessedMediaVariant {
+  id: string; // e.g. "primary", "1080p", "720p"
+  isPrimary: boolean;
+  path: string;
+  mimeType: string;
+  extension: string;
+  thumbnail?: Buffer; // Included on primary if generated
 }
 
 export interface MediaProcessorOptions {
@@ -132,6 +143,7 @@ export interface UploadResult {
   chunkIndex?: number;
   totalChunks?: number;
   progress?: number;
+  isProcessing?: boolean;
   metadata?: Record<string, any>;
   fields?: Record<string, any>;
   file?: FileRecord;
@@ -264,6 +276,7 @@ export interface MetadataRepository {
   findFiles(query: FileQuery): Promise<FileRecord[]>;
   deleteFiles(ids: string[]): Promise<number>;
   createChunk(chunk: ChunkRecord): Promise<void>;  // Made required
+  createChunks?(chunks: ChunkRecord[]): Promise<void>;
   getChunk(fileId: string, chunkNumber: number): Promise<Buffer | null>;  // Made required
   deleteChunksByFileId(fileId: string): Promise<number>;  // Made required
 }
@@ -299,6 +312,8 @@ export interface StorageAdapter {
   putStream?(fileId: string, stream: Readable, ctx: StorageContext): Promise<StorageWriteResult>;
   assembleChunksToPath?(fileId: string, totalChunks: number, ext: string, ctx: StorageContext): Promise<string>;
   readChunk?(fileId: string, chunkNumber: number, ctx: StorageContext): Promise<Buffer>;
+  hasActiveMultipart?(fileId: string): boolean;
+  abortMultipart?(fileId: string): Promise<void>;
 }
 
 export interface CacheAdapter {
@@ -364,6 +379,8 @@ export interface UploadEngineConfig {
   globalLimits?: SizeLimitMap;
   globalChunkLimits?: SizeLimitMap;
   onUploadComplete?: (file: FileRecord) => void | Promise<void>;
+  onProcessingStart?: (fileId: string, sessionId: string, context?: any) => void | Promise<void>;
+  onVariantComplete?: (variantFile: FileRecord, parentFileId: string) => void | Promise<void>;
   onError?: (error: Error, context: { uploadType?: string; sessionId?: string }) => void;
   staleUploadRetentionMs?: number;
   maxFieldSize?: number;
@@ -373,6 +390,33 @@ export interface UploadEngineConfig {
   autoRespond?: boolean;
   // NEW: MediaProcessor configuration
   mediaProcessor?: MediaProcessorOptions;
+  /**
+   * Secret key for HMAC-signing stateless upload tokens.
+   * Must be at least 32 characters for production use.
+   *
+   * This is NOT the same as your JWT/user auth secret.
+   * This secret is used solely for the upload handshake token
+   * that allows any server instance to validate incoming chunks
+   * without querying a shared session store.
+   *
+   * IMPORTANT: In multi-node/cluster deployments, ALL instances
+   * must share the same tokenSecret or tokens minted by one
+   * node cannot be verified by another.
+   *
+   * If omitted, a random secret is generated at boot (single-node only).
+   */
+  tokenSecret?: string;
+  /**
+   * Default upload token lifetime in seconds.
+   * Tokens expire after this duration, forcing the client to re-initiate.
+   * Default: 3600 (1 hour).
+   */
+  tokenTtlSeconds?: number;
+  /**
+   * Interval in ms for the background janitor to sweep orphaned uploads.
+   * Default: 24 hours. Set to 0 to disable the janitor.
+   */
+  janitorIntervalMs?: number;
 }
 
 export interface MediaProcessorOptions {
@@ -390,6 +434,8 @@ export interface ResolvedUploadEngineConfig extends Required<Pick<UploadEngineCo
   globalChunkLimits: SizeLimitMap;
   thumbnailGenerator?: ThumbnailGenerator;
   onUploadComplete?: (file: FileRecord) => void | Promise<void>;
+  onProcessingStart?: (fileId: string, sessionId: string, context?: any) => void | Promise<void>;
+  onVariantComplete?: (variantFile: FileRecord, parentFileId: string) => void | Promise<void>;
   onError?: (error: Error, context: { uploadType?: string; sessionId?: string }) => void;
   staleUploadRetentionMs: number;
   defaultUploadType?: string;
@@ -399,6 +445,9 @@ export interface ResolvedUploadEngineConfig extends Required<Pick<UploadEngineCo
   onProgress?: (progress: any) => void;
   autoRespond: boolean;
   hooks?: import('./hooks/types').UploadHooks;
+  tokenSecret?: string;
+  tokenTtlSeconds: number;
+  janitorIntervalMs: number;
 }
 
 export interface IncomingChunkFields {

@@ -1,15 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import {
-    AudioProcessingConfig,
-    ImageProcessingConfig,
-    MediaProcessorOptions,
-    ProcessingResult,
-    Quality,
-    QualityConfig,
-    VideoProcessingConfig,
-} from '../types';
+import type { ProcessedMediaVariant, MediaProcessorOptions, ProcessingResult, Quality, QualityConfig, VideoProcessingConfig, AudioProcessingConfig, ImageProcessingConfig } from '../types';
 
 export interface ExtendedProcessingResult extends ProcessingResult {
     outputPath?: string;
@@ -386,22 +378,7 @@ class TempFileManager {
     }
 }
 
-async function assembleChunksToDisk(chunks: Buffer[], outputPath: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-        const ws = fs.createWriteStream(outputPath);
-        ws.on('error', reject);
-        ws.on('finish', resolve);
-        let i = 0;
-        function writeNext() {
-            if (i >= chunks.length) { ws.end(); return; }
-            const chunk = chunks[i++];
-            const ok = ws.write(chunk);
-            if (ok) writeNext();
-            else ws.once('drain', writeNext);
-        }
-        writeNext();
-    });
-}
+// assembleChunksToDisk has been deprecated to favor explicit filesystem stream usage
 
 function buildScaleFilter(width: number | undefined, height: number | undefined): string | null {
     if (!width && !height) return null;
@@ -579,6 +556,8 @@ export class MediaProcessor {
 
     private get canProcessImages(): boolean { return this.sharp !== null; }
     private get canProcessMedia(): boolean { return this.ffmpeg !== null && this.ffmpegPath !== null; }
+    
+    getTempDir(): string { return this.tempDir; }
 
     // ── Image processing ──────────────────────────────────────────────────────
 
@@ -661,10 +640,58 @@ export class MediaProcessor {
             const inputExt = path.extname(originalFilename) || inferVideoExt(originalMimeType);
             const inputPath = tmp.create(inputExt, 'source');
             await fs.promises.writeFile(inputPath, safeBuffer);
-            return await this._encodeVideoFromPath(inputPath, originalMimeType, originalFilename, config, tmp);
+            
+            const generator = this.processVideoYieldingFromPath(inputPath, originalMimeType, originalFilename, config);
+            const first = await generator.next();
+            if (first.done || !first.value) {
+                return { cleanupFn: async () => {} } as any;
+            }
+            
+            return {
+                mimeType: first.value.mimeType,
+                extension: first.value.extension,
+                thumbnail: first.value.thumbnail,
+                variantPaths: { [first.value.id]: first.value.path },
+                outputPath: first.value.path,
+                generator,
+                cleanupFn: async () => {},
+            } as any;
         } finally {
-            await tmp.cleanup();
             this.semaphore.release();
+            // tmp.cleanup is delegated to the generator
+        }
+    }
+
+    async *processVideoYieldingFromPath(
+        inputPath: string,
+        originalMimeType: string,
+        originalFilename: string,
+        config: VideoProcessingConfig,
+    ): AsyncGenerator<ProcessedMediaVariant, void, unknown> {
+        if (!this.canProcessMedia) {
+            console.warn('[MediaProcessor] FFmpeg not available — returning passthrough.');
+            yield {
+                id: 'single',
+                isPrimary: true,
+                path: inputPath,
+                mimeType: originalMimeType,
+                extension: path.extname(originalFilename).slice(1) || 'mp4',
+            };
+            return;
+        }
+
+        await this.semaphore.acquire();
+        const tmp = new TempFileManager(this.tempDir);
+        let acquired = true;
+        const releaseOnce = () => { if (acquired) { acquired = false; this.semaphore.release(); } };
+
+        try {
+            const generator = this._encodeVideoYieldingFromPath(inputPath, originalMimeType, originalFilename, config, tmp);
+            for await (const variant of generator) {
+                yield variant;
+            }
+        } finally {
+            try { await tmp.cleanup(); } finally { releaseOnce(); }
         }
     }
 
@@ -711,6 +738,36 @@ export class MediaProcessor {
         }
     }
 
+    private async _encodeVideoFromPath(
+        inputPath: string,
+        originalMimeType: string,
+        originalFilename: string,
+        config: VideoProcessingConfig,
+        tmp: TempFileManager,
+    ): Promise<ExtendedProcessingResult> {
+        const generator = this._encodeVideoYieldingFromPath(inputPath, originalMimeType, originalFilename, config, tmp);
+        const variants: Record<string, string> = {};
+        let firstPath: string | undefined;
+        let mimeType: string | undefined;
+        let extension: string | undefined;
+
+        for await (const variant of generator) {
+            variants[variant.id] = variant.path;
+            if (!firstPath) {
+                firstPath = variant.path;
+                mimeType = variant.mimeType;
+                extension = variant.extension;
+            }
+        }
+
+        return {
+            outputPath: firstPath || '',
+            variantPaths: variants,
+            mimeType: mimeType || 'video/mp4',
+            extension: extension || 'mp4',
+        };
+    }
+
     private async probeSourceBitrateKbps(inputPath: string): Promise<number | null> {
         if (!this.ffmpeg) return null;
         try {
@@ -730,83 +787,77 @@ export class MediaProcessor {
         }
     }
 
-    private async _encodeVideoFromPath(
+    private async *_encodeVideoYieldingFromPath(
         inputPath: string,
         originalMimeType: string,
         originalFilename: string,
         config: VideoProcessingConfig,
         tmp: TempFileManager,
-    ): Promise<ExtendedProcessingResult> {
+    ): AsyncGenerator<ProcessedMediaVariant, void, unknown> {
         const outputFormat = normaliseFormat(config.format ?? 'mp4');
         const outputMime = `video/${outputFormat}`;
 
         const sourceBitrateKbps = await this.probeSourceBitrateKbps(inputPath);
-        if (sourceBitrateKbps != null) {
-            //console.log(`[MediaProcessor] Source bitrate: ${Math.round(sourceBitrateKbps)} kbps`);
-        }
 
-        if (config.qualityConfigs && config.qualityConfigs.length > 1) {
-
-            const variantSpecs = config.qualityConfigs.map((qc) => ({
-                qc,
-                outputPath: tmp.create(`.${outputFormat}`, qc.id),
-            }));
-
-            const cpuCount = os.cpus().length || 2;
-            const threadsPerProcess = Math.max(1, Math.floor(cpuCount / variantSpecs.length));
-
-            for (const { qc, outputPath } of variantSpecs) {
-                const q = resolveVideoQuality(qc, config.quality);
-                /*                 console.log(
-                                    `[MediaProcessor] Queuing variant ${qc.id} ` +
-                                    `(res: ${qc.resolution ?? 'inherit'}, crf: ${q.crf}, ` +
-                                    `b:v: ${q.videoBitrate}, preset: ${q.preset}, threads: ${threadsPerProcess})...`,
-                                ); */
-            }
-
-            const thumbnailPromise: Promise<Buffer | undefined> =
-                config.generateThumbnail !== false
-                    ? this.generateVideoThumbnailBuffer(inputPath, config.thumbnailTimeSeconds, tmp, 'thumb')
-                    : Promise.resolve(undefined);
-
-            await Promise.all(
-                variantSpecs.map(({ qc, outputPath }) =>
-                    this.runFFmpegVideo(
-                        inputPath, outputPath, outputFormat, config, qc,
-                        threadsPerProcess, variantSpecs.length, sourceBitrateKbps,
-                    ).then(() => {
-                        //const sizeKB = (fs.statSync(outputPath).size / 1024).toFixed(0);
-                        //console.log(`[MediaProcessor] Variant ${qc.id} done — ${sizeKB} KB`);
-                    })
-                )
-            );
-
-            const thumbnail = await thumbnailPromise;
-
-            const variantPaths: Record<string, string> = {};
-            for (const { qc, outputPath } of variantSpecs) {
-                variantPaths[qc.id] = outputPath;
-            }
-
-            const firstId = config.qualityConfigs[0].id;
-
-            return {
-                variants: {}, variantPaths,
-                buffer: undefined, outputPath: variantPaths[firstId],
-                thumbnail, mimeType: outputMime, extension: outputFormat,
-            };
-        }
-
-        // Single quality — output keyed as "single" instead of a random suffix.
-        const outputPath = tmp.create(`.${outputFormat}`, 'single');
         const thumbnailPromise: Promise<Buffer | undefined> =
             config.generateThumbnail !== false
                 ? this.generateVideoThumbnailBuffer(inputPath, config.thumbnailTimeSeconds, tmp, 'thumb')
                 : Promise.resolve(undefined);
+
+        if (config.qualityConfigs && config.qualityConfigs.length > 1) {
+            const cpuCount = os.cpus().length || 2;
+            const threadsPerProcess = Math.max(1, cpuCount);
+
+            const primaryQc = config.qualityConfigs[0];
+            const primaryPath = tmp.create(`.${outputFormat}`, primaryQc.id);
+            await this.runFFmpegVideo(inputPath, primaryPath, outputFormat, config, primaryQc, threadsPerProcess, 1, sourceBitrateKbps);
+
+            const thumbnail = await thumbnailPromise;
+
+            yield {
+                id: primaryQc.id,
+                isPrimary: true,
+                path: primaryPath,
+                mimeType: outputMime,
+                extension: outputFormat,
+                thumbnail,
+            };
+
+            const remainingQcs = config.qualityConfigs.slice(1);
+            if (remainingQcs.length > 0) {
+                const parallelJobs = remainingQcs.map(async (qc) => {
+                    const outputPath = tmp.create(`.${outputFormat}`, qc.id);
+                    await this.runFFmpegVideo(inputPath, outputPath, outputFormat, config, qc, threadsPerProcess, remainingQcs.length, sourceBitrateKbps);
+                    return {
+                        id: qc.id,
+                        isPrimary: false,
+                        path: outputPath,
+                        mimeType: outputMime,
+                        extension: outputFormat,
+                        thumbnail: undefined,
+                    };
+                });
+
+                for (const job of parallelJobs) {
+                    yield await job;
+                }
+            }
+            return;
+        }
+
+        // Single quality
+        const outputPath = tmp.create(`.${outputFormat}`, 'single');
         await this.runFFmpegVideo(inputPath, outputPath, outputFormat, config, undefined, undefined, 1, sourceBitrateKbps);
-        const buffer = await fs.promises.readFile(outputPath);
         const thumbnail = await thumbnailPromise;
-        return { buffer, outputPath, thumbnail, mimeType: outputMime, extension: outputFormat };
+        
+        yield {
+            id: 'single',
+            isPrimary: true,
+            path: outputPath,
+            mimeType: outputMime,
+            extension: outputFormat,
+            thumbnail,
+        };
     }
 
     private async runFFmpegVideo(
@@ -986,18 +1037,26 @@ export class MediaProcessor {
 
             cmd = cmd.format(outputFormat).output(outputPath);
 
-            const timer = setTimeout(() => {
-                try { cmd.kill('SIGKILL'); } catch { }
-                reject(new Error(
-                    `[MediaProcessor] FFmpeg timed out after ${this.timeoutMs / 1000}s ` +
-                    `encoding variant (crf=${q.crf}, preset=${preset}, ` +
-                    `res=${q.width ?? '?'}x${q.height ?? '?'}).`,
-                ));
-            }, this.timeoutMs);
+            let timer: NodeJS.Timeout | null = null;
+            if (this.timeoutMs > 0) {
+                timer = setTimeout(() => {
+                    try { cmd.kill('SIGKILL'); } catch { }
+                    reject(new Error(
+                        `[MediaProcessor] FFmpeg timed out after ${this.timeoutMs / 1000}s ` +
+                        `encoding variant (crf=${q.crf}, preset=${preset}, ` +
+                        `res=${q.width ?? '?'}x${q.height ?? '?'}).`,
+                    ));
+                }, this.timeoutMs);
+            }
 
             cmd
-                .on('end', () => { clearTimeout(timer); resolve(); })
-                .on('error', (err: Error) => { clearTimeout(timer); reject(err); })
+                .on('progress', (progress: any) => {
+                    if (config.onProgress) {
+                        try { config.onProgress({ ...progress, variantId: qc?.id ?? 'single' }); } catch { }
+                    }
+                })
+                .on('end', () => { if (timer) clearTimeout(timer); resolve(); })
+                .on('error', (err: Error) => { if (timer) clearTimeout(timer); reject(err); })
                 .run();
         });
     }
@@ -1025,6 +1084,34 @@ export class MediaProcessor {
         } finally {
             await tmp.cleanup();
             this.semaphore.release();
+        }
+    }
+
+    async *processAudioYieldingFromPath(
+        inputPath: string,
+        originalMimeType: string,
+        originalFilename: string,
+        config: AudioProcessingConfig,
+    ): AsyncGenerator<ProcessedMediaVariant, void, unknown> {
+        if (!this.canProcessMedia) {
+            console.warn('[MediaProcessor] FFmpeg not available — returning passthrough.');
+            yield {
+                id: 'single', isPrimary: true, path: inputPath, mimeType: originalMimeType,
+                extension: path.extname(originalFilename).slice(1) || 'mp3'
+            };
+            return;
+        }
+        await this.semaphore.acquire();
+        const tmp = new TempFileManager(this.tempDir);
+        let acquired = true;
+        const releaseOnce = () => { if (acquired) { acquired = false; this.semaphore.release(); } };
+        try {
+            const result = await this._encodeAudioFromPath(inputPath, originalMimeType, config, tmp);
+            yield {
+                id: 'single', isPrimary: true, path: result.outputPath!, mimeType: result.mimeType, extension: result.extension
+            };
+        } finally {
+            try { await tmp.cleanup(); } finally { releaseOnce(); }
         }
     }
 
@@ -1149,14 +1236,17 @@ export class MediaProcessor {
 
             cmd = cmd.format(outputFormat).output(outputPath);
 
-            const timer = setTimeout(() => {
-                try { cmd.kill('SIGKILL'); } catch { }
-                reject(new Error(`[MediaProcessor] FFmpeg audio timed out after ${this.timeoutMs / 1000}s`));
-            }, this.timeoutMs);
+            let timer: NodeJS.Timeout | null = null;
+            if (this.timeoutMs > 0) {
+                timer = setTimeout(() => {
+                    try { cmd.kill('SIGKILL'); } catch { }
+                    reject(new Error(`[MediaProcessor] FFmpeg audio timed out after ${this.timeoutMs / 1000}s`));
+                }, this.timeoutMs);
+            }
 
             cmd
-                .on('end', () => { clearTimeout(timer); resolve(); })
-                .on('error', (err: Error) => { clearTimeout(timer); reject(err); })
+                .on('end', () => { if (timer) clearTimeout(timer); resolve(); })
+                .on('error', (err: Error) => { if (timer) clearTimeout(timer); reject(err); })
                 .run();
         });
     }
@@ -1244,14 +1334,7 @@ export class MediaProcessor {
 
     // ── Public helpers (used by UploadEngine) ─────────────────────────────────
 
-    async assembleChunksToDisk(chunks: Buffer[], ext: string): Promise<string> {
-        const outputPath = path.join(
-            this.tempDir,
-            `upload_assembled_${Date.now()}_${Math.random().toString(36).substring(2, 9)}${ext}`,
-        );
-        await assembleChunksToDisk(chunks, outputPath);
-        return outputPath;
-    }
+
 
     async writeTempFile(buffer: Buffer | Uint8Array | ArrayBuffer, ext: string): Promise<string> {
         const safeBuffer = ensureBuffer(buffer);

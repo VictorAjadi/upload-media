@@ -105,6 +105,7 @@ export interface InitializeUploadParams {
   metadata?: any[];
   uploadType: string;
   transformer?: TransformerConfig; // TransformerConfig from backend
+  mockNetworkDropRate?: number;
 }
 
 const speedCalculators = new Map<string, { samples: Array<{ timestamp: number; progress: number }> }>();
@@ -191,7 +192,7 @@ export const useUploadProgress = createStore<UploadProgressState>()(
           state.concurrentUploads += 1;
         });
 
-        const { uploadId, blobs, endpoint, method, postData, metadata, filenameArray, uploadType, transformer } = params;
+        const { uploadId, blobs, endpoint, method, postData, metadata, filenameArray, uploadType, transformer, mockNetworkDropRate } = params;
 
         set((state: UploadProgressState) => {
           state.uploads = state.uploads.filter((u) => u.uploadId !== uploadId);
@@ -228,6 +229,7 @@ export const useUploadProgress = createStore<UploadProgressState>()(
             metadata,
             uploadType,
             allFilesSessionId: [],
+            mockNetworkDropRate,
           };
 
           state.uploads.push(newUpload);
@@ -235,6 +237,12 @@ export const useUploadProgress = createStore<UploadProgressState>()(
         });
 
         const worker = get().createWorker(uploadId);
+        if (typeof mockNetworkDropRate === 'number') {
+          worker.postMessage({
+            type: 'configure',
+            config: { mockNetworkDropRate },
+          });
+        }
         worker.postMessage({
           type: 'upload',
           uploadId,
@@ -312,6 +320,8 @@ export const useUploadProgress = createStore<UploadProgressState>()(
             file.totalChunks = message.totalChunks || 0;
             file.status = 'uploading';
           }
+          
+          if (message.response) upload.responseData = message.response;
 
           // Speed calculation
           const calculator = speedCalculators.get(message.uploadId);
@@ -347,6 +357,7 @@ export const useUploadProgress = createStore<UploadProgressState>()(
           upload.overallProgress = success ? 100 : upload.overallProgress;
           upload.progress = success ? 100 : upload.progress;
           if (error) upload.error = error;
+          if (data) upload.responseData = data;
 
           upload.files.forEach((file: any) => {
             file.status = success ? 'completed' : file.status === 'completed' ? 'completed' : 'failed';
@@ -420,6 +431,12 @@ export const useUploadProgress = createStore<UploadProgressState>()(
 
         speedCalculators.set(uploadId, { samples: [] });
         const worker = get().createWorker(uploadId);
+        if (upload && typeof upload.mockNetworkDropRate === 'number') {
+          worker.postMessage({
+            type: 'configure',
+            config: { mockNetworkDropRate: upload.mockNetworkDropRate },
+          });
+        }
         worker.postMessage({
           type: 'resume',
           uploadId,
@@ -482,6 +499,12 @@ export const useUploadProgress = createStore<UploadProgressState>()(
 
         speedCalculators.set(uploadId, { samples: [] });
         const worker = get().createWorker(uploadId);
+        if (upload && typeof upload.mockNetworkDropRate === 'number') {
+          worker.postMessage({
+            type: 'configure',
+            config: { mockNetworkDropRate: upload.mockNetworkDropRate },
+          });
+        }
         worker.postMessage({
           type: 'resume',
           uploadId,

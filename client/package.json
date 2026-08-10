@@ -1,10 +1,13 @@
 {
   "name": "upload-media-client",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Framework-agnostic chunk and direct file upload client library",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

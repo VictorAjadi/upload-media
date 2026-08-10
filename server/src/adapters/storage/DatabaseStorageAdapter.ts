@@ -210,11 +210,20 @@ export class DatabaseStorageAdapter implements StorageAdapter {
     chunkSize: number,
   ): Promise<StreamWriteResult> {
     const chunkCount = Math.max(1, Math.ceil(buffer.length / chunkSize));
+    const chunks: import('../../types').ChunkRecord[] = [];
+
     for (let i = 0; i < chunkCount; i++) {
       const start = i * chunkSize;
       const end = Math.min(start + chunkSize, buffer.length);
-      await this.database.createChunk!({ fileId, chunkNumber: i, data: buffer.subarray(start, end) });
+      chunks.push({ fileId, chunkNumber: i, data: buffer.subarray(start, end) });
     }
+
+    if (this.database.createChunks) {
+      await this.database.createChunks(chunks);
+    } else {
+      await Promise.all(chunks.map((c) => this.database.createChunk!(c)));
+    }
+
     return { storageRef: fileId, chunkCount, chunkSize, totalSize: buffer.length };
   }
 
@@ -255,6 +264,19 @@ export class DatabaseStorageAdapter implements StorageAdapter {
     let pending: Buffer[] = [];
     let pendingLength = 0;
 
+    const batch: import('../../types').ChunkRecord[] = [];
+    const BATCH_SIZE = 8;
+
+    const flushBatch = async () => {
+      if (batch.length === 0) return;
+      if (this.database.createChunks) {
+        await this.database.createChunks(batch);
+      } else {
+        await Promise.all(batch.map((c) => this.database.createChunk!(c)));
+      }
+      batch.length = 0;
+    };
+
     for await (const chunk of source) {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       pending.push(buf);
@@ -284,21 +306,25 @@ export class DatabaseStorageAdapter implements StorageAdapter {
         
         const piece = pieces.length === 1 ? pieces[0] : Buffer.concat(pieces, chunkSize);
         
-        // This await automatically asserts backpressure on `source` 
-        // since we are within a 'for await' loop.
-        await this.database.createChunk!({ fileId, chunkNumber, data: Buffer.from(piece) });
+        batch.push({ fileId, chunkNumber, data: Buffer.from(piece) });
         chunkNumber += 1;
         totalBytes += piece.length;
+
+        if (batch.length >= BATCH_SIZE) {
+          await flushBatch();
+        }
       }
     }
 
     // Flush whatever remains as the final (possibly smaller) chunk.
     if (pendingLength > 0) {
       const piece = pending.length === 1 ? pending[0] : Buffer.concat(pending, pendingLength);
-      await this.database.createChunk!({ fileId, chunkNumber, data: Buffer.from(piece) });
+      batch.push({ fileId, chunkNumber, data: Buffer.from(piece) });
       chunkNumber += 1;
       totalBytes += piece.length;
     }
+
+    await flushBatch();
 
     // Guarantee at least one chunk row exists even for a zero-byte source,
     // so chunkCount is never 0 and downstream readers don't divide by zero.

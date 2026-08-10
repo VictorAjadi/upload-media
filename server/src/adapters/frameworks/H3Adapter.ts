@@ -17,6 +17,8 @@ import {
   MetadataRepository,
 } from '../../types';
 
+import { FileServingHandler } from '../../core/FileServingHandler';
+
 /**
  * Minimal H3-compatible event type.
  * We intentionally avoid importing from `h3`
@@ -281,178 +283,35 @@ export const createH3Adapter =
 export class CreateH3FileServingHandler {
   constructor(
     private rootDir: string,
-
     private database?: MetadataRepository,
-
-    private cacheMaxAge: string =
-      '1d'
+    private cacheMaxAge: string = '1d'
   ) { }
 
   async serveFile(
     ref: string,
-
     event: H3EventLike
-  ): Promise<Buffer> {
-    const fullPath =
-      path.resolve(
-        this.rootDir,
-        ref
-      );
+  ): Promise<void> {
+    const handler = new FileServingHandler(
+      this.rootDir,
+      this.database,
+      this.cacheMaxAge
+    );
 
-    if (
-      !fullPath.startsWith(
-        path.resolve(
-          this.rootDir
-        )
-      )
-    ) {
-      throw createError({
-        statusCode: 403,
+    const rangeHeader = event.node.req.headers.range || (event.node.req.headers as any).Range;
+    let startByte: number | undefined;
+    let endByte: number | undefined;
 
-        statusMessage:
-          'Forbidden',
-      });
-    }
-
-    try {
-      const stat =
-        await fs.stat(
-          fullPath
-        );
-
-      if (!stat.isFile()) {
-        throw createError({
-          statusCode: 404,
-
-          statusMessage:
-            'Not found',
-        });
-      }
-
-      let mimeType =
-        'application/octet-stream';
-
-      if (this.database) {
-        try {
-          const fileId =
-            this.extractFileId(
-              ref
-            );
-
-          const fileRecord =
-            await this.database.getFileById(
-              fileId
-            );
-
-          if (
-            fileRecord?.contentType
-          ) {
-            mimeType =
-              fileRecord.contentType;
-          }
-        } catch (error) {
-          console.warn(
-            '[H3FileServing] DB lookup failed:',
-            error
-          );
+    if (rangeHeader && typeof rangeHeader === 'string') {
+      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+      if (match) {
+        startByte = parseInt(match[1], 10);
+        if (match[2]) {
+          endByte = parseInt(match[2], 10);
         }
       }
-
-      const fileBuffer =
-        await fs.readFile(
-          fullPath
-        );
-
-      setHeader(
-        event,
-        'Content-Type',
-        mimeType
-      );
-
-      setHeader(
-        event,
-        'Content-Length',
-        String(
-          stat.size
-        )
-      );
-
-      setHeader(
-        event,
-        'Cache-Control',
-        `public, max-age=${this.getCacheSeconds()}`
-      );
-
-      return fileBuffer;
-    } catch (error: any) {
-      console.error(
-        '[H3FileServing] Error:',
-        error
-      );
-
-      if (
-        error?.statusCode ===
-        403 ||
-        error?.statusCode ===
-        404
-      ) {
-        throw error;
-      }
-
-      throw createError({
-        statusCode: 500,
-
-        statusMessage:
-          'Internal server error',
-      });
-    }
-  }
-
-  private extractFileId(
-    ref: string
-  ): string {
-    return path
-      .basename(ref)
-      .replace(
-        /\.[^/.]+$/,
-        ''
-      );
-  }
-
-  private getCacheSeconds(): number {
-    const match =
-      this.cacheMaxAge.match(
-        /^(\d+)([mhd]?)$/
-      );
-
-    if (!match) {
-      return 86400;
     }
 
-    const [
-      ,
-      num,
-      unit,
-    ] = match;
-
-    const value =
-      parseInt(
-        num,
-        10
-      );
-
-    switch (unit) {
-      case 'm':
-        return value * 60;
-
-      case 'h':
-        return value * 3600;
-
-      case 'd':
-        return value * 86400;
-
-      default:
-        return value;
-    }
+    const normalizedRes = new H3NormalizedResponse(event);
+    await handler.serveFile(ref, normalizedRes, startByte, endByte);
   }
 }

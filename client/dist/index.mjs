@@ -117,7 +117,7 @@ var useUploadProgress = createStore()(
           state.uploadQueue.delete(nextUploadId);
           state.concurrentUploads += 1;
         });
-        const { uploadId, blobs, endpoint, method, postData, metadata, filenameArray, uploadType, transformer } = params;
+        const { uploadId, blobs, endpoint, method, postData, metadata, filenameArray, uploadType, transformer, mockNetworkDropRate } = params;
         set((state) => {
           state.uploads = state.uploads.filter((u) => u.uploadId !== uploadId);
           const fileItems = blobs.map((file, index) => ({
@@ -150,12 +150,19 @@ var useUploadProgress = createStore()(
             postData,
             metadata,
             uploadType,
-            allFilesSessionId: []
+            allFilesSessionId: [],
+            mockNetworkDropRate
           };
           state.uploads.push(newUpload);
           speedCalculators.set(uploadId, { samples: [] });
         });
         const worker = get().createWorker(uploadId);
+        if (typeof mockNetworkDropRate === "number") {
+          worker.postMessage({
+            type: "configure",
+            config: { mockNetworkDropRate }
+          });
+        }
         worker.postMessage({
           type: "upload",
           uploadId,
@@ -221,6 +228,7 @@ var useUploadProgress = createStore()(
             file.totalChunks = message.totalChunks || 0;
             file.status = "uploading";
           }
+          if (message.response) upload.responseData = message.response;
           const calculator = speedCalculators.get(message.uploadId);
           if (calculator && overallProgress < 100 && overallProgress > 0) {
             const now = Date.now();
@@ -250,6 +258,7 @@ var useUploadProgress = createStore()(
           upload.overallProgress = success ? 100 : upload.overallProgress;
           upload.progress = success ? 100 : upload.progress;
           if (error) upload.error = error;
+          if (data) upload.responseData = data;
           upload.files.forEach((file) => {
             file.status = success ? "completed" : file.status === "completed" ? "completed" : "failed";
             file.progress = success ? 100 : file.progress;
@@ -313,6 +322,12 @@ var useUploadProgress = createStore()(
         });
         speedCalculators.set(uploadId, { samples: [] });
         const worker = get().createWorker(uploadId);
+        if (upload && typeof upload.mockNetworkDropRate === "number") {
+          worker.postMessage({
+            type: "configure",
+            config: { mockNetworkDropRate: upload.mockNetworkDropRate }
+          });
+        }
         worker.postMessage({
           type: "resume",
           uploadId
@@ -368,6 +383,12 @@ var useUploadProgress = createStore()(
         });
         speedCalculators.set(uploadId, { samples: [] });
         const worker = get().createWorker(uploadId);
+        if (upload && typeof upload.mockNetworkDropRate === "number") {
+          worker.postMessage({
+            type: "configure",
+            config: { mockNetworkDropRate: upload.mockNetworkDropRate }
+          });
+        }
         worker.postMessage({
           type: "resume",
           uploadId

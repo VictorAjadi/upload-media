@@ -600,6 +600,7 @@ state.uploads
 - **Format Support**: Any binary type (Blobs, ArrayBuffers, Files).
 - **Runtime**: Chrome 80+, Safari 13+, Firefox 75+, Edge 80+.
 - **Memory Management**: Uses `Blob.slice()` for zero-RAM overhead on multi-gigabyte files.
+- **Enterprise-Scale Server Ingestion**: Out of the box, perfectly complements the server's streaming layer by preventing V8 Heap Out-Of-Memory (OOM) failures for single monolithic streams > 50MB.
 
 ---
 

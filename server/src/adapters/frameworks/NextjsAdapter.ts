@@ -93,22 +93,8 @@ class NextjsNormalizedResponse
       this.headers['Content-Type'] ||
       'application/octet-stream';
 
-    return new Promise((resolve, reject) => {
-      const chunks: Buffer[] = [];
-
-      stream.on('data', (chunk) =>
-        chunks.push(chunk)
-      );
-
-      stream.on('error', reject);
-
-      stream.on('end', () => {
-        this.body =
-          Buffer.concat(chunks);
-
-        resolve();
-      });
-    });
+    // Zero-Copy Content Delivery: convert Node.js Readable to Web ReadableStream
+    this.body = Readable.toWeb(stream);
   }
 
   end(): void {
@@ -194,7 +180,7 @@ export class CreateNextjsFileServingHandler {
     }
   ) { }
 
-  async serveFile(ref: string): Promise<Response> {
+  async serveFile(ref: string, req?: NextRequest): Promise<Response> {
     const config = this.config;
     const isString = typeof config === 'string';
     const rootDir = isString ? config : config.rootDir;
@@ -210,9 +196,36 @@ export class CreateNextjsFileServingHandler {
     const bridge =
       new NextjsNormalizedResponse();
 
+    let startByte: number | undefined;
+    let endByte: number | undefined;
+
+    if (req) {
+      const headers = req.headers;
+      let rangeHeader: string | null = null;
+      if (headers) {
+        if (typeof headers.get === 'function') {
+          rangeHeader = headers.get('range');
+        } else {
+          rangeHeader = headers.range || headers['range'];
+        }
+      }
+
+      if (rangeHeader) {
+        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+        if (match) {
+          startByte = parseInt(match[1], 10);
+          if (match[2]) {
+            endByte = parseInt(match[2], 10);
+          }
+        }
+      }
+    }
+
     await handler.serveFile(
       ref,
-      bridge as any
+      bridge as any,
+      startByte,
+      endByte
     );
 
     return bridge.raw;

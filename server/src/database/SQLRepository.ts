@@ -348,6 +348,35 @@ export class SQLRepository implements MetadataRepository {
     await this.executor.execute(sql, [chunk.fileId, chunk.chunkNumber, chunk.data]);
   }
 
+  async createChunks(chunks: ChunkRecord[]): Promise<void> {
+    if (chunks.length === 0) return;
+
+    const values: any[] = [];
+    const rowsSql: string[] = [];
+    let paramCount = 1;
+
+    for (const chunk of chunks) {
+      rowsSql.push(`($${paramCount}, $${paramCount + 1}, $${paramCount + 2})`);
+      values.push(chunk.fileId, chunk.chunkNumber, chunk.data);
+      paramCount += 3;
+    }
+
+    const sql = `INSERT INTO ${this.chunksTable} (file_id, chunk_number, data) VALUES ${rowsSql.join(',')}`;
+
+    try {
+      await this.executor.execute(sql, values);
+    } catch (err) {
+      console.warn('[SQLRepository] Bulk chunk insert failed, falling back to individual inserts:', err);
+      for (const chunk of chunks) {
+        try {
+          await this.createChunk(chunk);
+        } catch (individualErr) {
+          // Ignore duplicate constraint failures (similar to upsert retry behavior)
+        }
+      }
+    }
+  }
+
   async getChunk(fileId: string, chunkNumber: number): Promise<Buffer | null> {
     const sql = `SELECT data FROM ${this.chunksTable} WHERE file_id = $1 AND chunk_number = $2`;
     const rows = await this.executor.query(sql, [fileId, chunkNumber]);

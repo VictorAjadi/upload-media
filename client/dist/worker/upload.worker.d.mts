@@ -1,10 +1,12 @@
 /**
- * upload.worker.ts (v2)
+ * upload.worker.ts (v3)
  *
- * Simplified for backend-driven processing:
- * - No modification/transformation round-trips
- * - No thumbnail generation
- * - Just chunked upload with pause/resume/cancel
+ * Stateless, hardware-optimized chunked upload worker.
+ *
+ * v3 changes:
+ * - IndexedDB Storage Durability Shield (persistent storage request)
+ * - Quota capacity monitoring before upload start
+ * - Foundation for stateless token handshake (Phase 2)
  */
 type WorkerProgress = {
     uploadId: string;
@@ -27,6 +29,7 @@ type WorkerProgress = {
     retryCount?: number;
     maxRetriesReached?: boolean;
     transformer?: any;
+    completedChunksMap?: Record<string, boolean>;
 } | null;
 
 export type { WorkerProgress };

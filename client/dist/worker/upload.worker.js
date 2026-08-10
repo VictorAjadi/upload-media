@@ -18,6 +18,67 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
 // src/worker/upload.worker.ts
 var upload_worker_exports = {};
 module.exports = __toCommonJS(upload_worker_exports);
+
+// src/worker/durability.ts
+var HEADROOM_MULTIPLIER = 2;
+async function requestPersistentStorage() {
+  if (typeof navigator === "undefined" || !navigator.storage) {
+    return { persisted: false, quota: null, apiAvailable: false };
+  }
+  let persisted = false;
+  try {
+    persisted = await navigator.storage.persisted();
+  } catch {
+  }
+  if (!persisted) {
+    try {
+      persisted = await navigator.storage.persist();
+    } catch {
+      persisted = false;
+    }
+  }
+  const quota = await getQuota();
+  return { persisted, quota, apiAvailable: true };
+}
+async function getQuota() {
+  if (typeof navigator === "undefined" || !navigator.storage?.estimate) {
+    return null;
+  }
+  try {
+    const estimate = await navigator.storage.estimate();
+    const usage = estimate.usage ?? 0;
+    const quota = estimate.quota ?? 0;
+    return {
+      usage,
+      quota,
+      available: Math.max(0, quota - usage)
+    };
+  } catch {
+    return null;
+  }
+}
+async function checkStorageCapacity(totalRemainingBytes) {
+  const requiredBytes = totalRemainingBytes * HEADROOM_MULTIPLIER;
+  const quota = await getQuota();
+  if (!quota) {
+    return { sufficient: true, availableBytes: Infinity, requiredBytes };
+  }
+  return {
+    sufficient: quota.available >= requiredBytes,
+    availableBytes: quota.available,
+    requiredBytes
+  };
+}
+function formatBytes(bytes) {
+  if (bytes === Infinity) return "\u221E";
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, i);
+  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+// src/worker/upload.worker.ts
 function generateSessionId() {
   const timestamp = Date.now().toString(36);
   const randomStr = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
@@ -37,7 +98,8 @@ var config = {
   dbName: "UploadDB",
   dbVersion: 3,
   tokenStrategy: "message",
-  fetchCredentials: "same-origin"
+  fetchCredentials: "same-origin",
+  mockNetworkDropRate: 0
 };
 function chunkSizeFor(fileType) {
   if (fileType.startsWith("video/")) return config.chunkSizes.video;
@@ -106,8 +168,22 @@ var statusManager = new UploadStatusManager();
 var UploadStorage = class {
   constructor() {
     __publicField(this, "db", null);
+    __publicField(this, "durabilityStatus", null);
   }
   async init() {
+    try {
+      this.durabilityStatus = await requestPersistentStorage();
+      if (this.durabilityStatus.apiAvailable && !this.durabilityStatus.persisted) {
+        self.postMessage({
+          type: "storage_warning",
+          message: "Browser denied persistent storage. Upload data may be evicted under memory pressure. Paused uploads are at risk of data loss on low-storage devices.",
+          quota: this.durabilityStatus.quota,
+          persisted: false
+        });
+      }
+    } catch (durabilityError) {
+      console.warn("[Worker] Storage durability check failed:", durabilityError);
+    }
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(config.dbName, config.dbVersion);
       request.onerror = () => reject(request.error);
@@ -132,6 +208,25 @@ var UploadStorage = class {
         }
       };
     });
+  }
+  /**
+   * Check whether the browser has enough storage capacity for a new upload.
+   * Emits a warning message if headroom is insufficient but does NOT block
+   * the upload — the caller decides policy.
+   */
+  async checkCapacityForUpload(totalBytes, uploadId) {
+    const check = await checkStorageCapacity(totalBytes);
+    if (!check.sufficient) {
+      self.postMessage({
+        type: "storage_warning",
+        uploadId,
+        message: `Low storage: ${formatBytes(check.availableBytes)} available, but ${formatBytes(check.requiredBytes)} needed (2\xD7 safety margin for ${formatBytes(totalBytes)} upload). Upload will proceed, but resume data may be evicted if the device runs low on storage.`,
+        availableBytes: check.availableBytes,
+        requiredBytes: check.requiredBytes
+      });
+      return false;
+    }
+    return true;
   }
   async storeFile(uploadId, fileIndex, blob, metadata) {
     if (!this.db) throw new Error("Database not initialized");
@@ -287,6 +382,12 @@ async function uploadChunk(formData, endpoint, method, token, uploadId, signal) 
   return withRetry(async () => {
     if (statusManager.isCancelled(uploadId)) throw new Error("Upload cancelled");
     if (statusManager.isPaused(uploadId)) throw new Error("Upload paused");
+    if (typeof config.mockNetworkDropRate === "number" && config.mockNetworkDropRate > 0) {
+      if (Math.random() < config.mockNetworkDropRate) {
+        console.warn(`[Worker] Simulating mock network drop (rate: ${config.mockNetworkDropRate})`);
+        throw new Error("Simulated network connection drop");
+      }
+    }
     const headers = {};
     if (token) headers.Authorization = `Bearer ${token}`;
     const response = await fetch(endpoint, {
@@ -363,40 +464,154 @@ async function processFilesUpload(uploadId, blobArray, filenameArray, uploadStat
       await storage.storeProgress(uploadId, uploadState);
       const chunkSize = chunkSizeFor(currentBlob.type);
       const totalChunks = Math.ceil(currentBlob.size / chunkSize);
-      const startChunkIndex = resumeUpload && fileIndex === uploadState.currentFileIndex ? uploadState.currentChunkIndex : 0;
-      for (let chunkIdx = startChunkIndex; chunkIdx < totalChunks; chunkIdx++) {
-        if (statusManager.isCancelled(uploadId)) {
-          abortController.abort();
-          uploadState.status = "cancelled";
-          await storage.storeProgress(uploadId, uploadState);
-          self.postMessage({
-            type: "cancelled",
-            uploadId,
-            message: "Upload cancelled by user"
-          });
-          return;
+      const chunksToUpload = [];
+      const completedChunksMap = uploadState.completedChunksMap || {};
+      uploadState.completedChunksMap = completedChunksMap;
+      for (let chunkIdx = 0; chunkIdx < totalChunks - 1; chunkIdx++) {
+        const isCompleted = resumeUpload && completedChunksMap[`${fileIndex}_${chunkIdx}`] === true;
+        if (!isCompleted) {
+          chunksToUpload.push(chunkIdx);
         }
-        if (statusManager.isPaused(uploadId)) {
-          uploadState.currentChunkIndex = chunkIdx;
-          uploadState.status = "paused";
-          await storage.storeProgress(uploadId, uploadState);
-          self.postMessage({
-            type: "paused",
-            uploadId,
-            message: "Upload paused",
-            currentFileIndex: fileIndex,
-            currentChunkIndex: chunkIdx,
-            progress: uploadState.overallProgress
-          });
-          return;
+      }
+      if (chunksToUpload.length > 0) {
+        const activePromises = [];
+        let nextQueueIndex = 0;
+        let uploadError = null;
+        const runWorker = async () => {
+          while (nextQueueIndex < chunksToUpload.length && !uploadError) {
+            if (statusManager.isCancelled(uploadId)) break;
+            if (statusManager.isPaused(uploadId)) break;
+            const currentQueueIndex = nextQueueIndex++;
+            if (currentQueueIndex >= chunksToUpload.length) break;
+            const chunkIdx = chunksToUpload[currentQueueIndex];
+            const start = chunkIdx * chunkSize;
+            const end = Math.min(start + chunkSize, currentBlob.size);
+            const chunk = currentBlob.slice(start, end);
+            const formData = new FormData();
+            formData.append("sessionId", sessionId);
+            formData.append("chunkIndex", chunkIdx.toString());
+            formData.append("totalChunks", totalChunks.toString());
+            formData.append("file", new Blob([chunk], { type: currentBlob.type }), currentFilename);
+            formData.append("mimetype", currentBlob.type);
+            formData.append("chunksize", chunkSize.toString());
+            formData.append("filename", currentFilename);
+            formData.append("totalSize", currentBlob.size.toString());
+            formData.append("uploadType", uploadState.uploadType || "default");
+            if (uploadState.transformer) {
+              formData.append("transformer", JSON.stringify(uploadState.transformer));
+            }
+            if (uploadState.metadata && uploadState.metadata.length > 0) {
+              const metadataVal = uploadState.metadata[fileIndex];
+              if (metadataVal) {
+                Object.entries(metadataVal).forEach(([key, value]) => {
+                  if (typeof value === "object") {
+                    formData.append(key, JSON.stringify(value));
+                  } else {
+                    formData.append(key, String(value));
+                  }
+                });
+              }
+            }
+            if (uploadState.postData) {
+              Object.entries(uploadState.postData).forEach(([key, value]) => {
+                if (typeof value === "object") {
+                  formData.append(key, JSON.stringify(value));
+                } else {
+                  formData.append(key, String(value));
+                }
+              });
+            }
+            try {
+              let token = "";
+              try {
+                token = await getAuthToken();
+              } catch (error) {
+                console.warn("[Worker] Token request failed, continuing without authentication");
+              }
+              const response = await uploadChunk(
+                formData,
+                uploadState.endpoint || "/api/upload",
+                uploadState.method || "POST",
+                token,
+                uploadId,
+                abortController.signal
+              );
+              if (statusManager.isCancelled(uploadId) || statusManager.isPaused(uploadId)) {
+                break;
+              }
+              const validStatuses = ["success", "chunk_received"];
+              if (!response?.data || !validStatuses.includes(response.data.status)) {
+                throw new Error(response?.data?.message || "Chunk upload failed");
+              }
+              completedChunksMap[`${fileIndex}_${chunkIdx}`] = true;
+              uploadState.completedChunksMap = completedChunksMap;
+              const fileProgress = Object.keys(completedChunksMap).filter((k) => k.startsWith(`${fileIndex}_`)).length / totalChunks * 100;
+              const totalProgress = (uploadState.completedFiles * 100 + fileProgress) / fileCount;
+              uploadState.overallProgress = Math.min(totalProgress, 99.9).toFixed(1);
+              uploadState.status = "uploading";
+              uploadState.retryCount = 0;
+              await storage.storeProgress(uploadId, uploadState);
+              self.postMessage({
+                type: "progress",
+                uploadId,
+                fileIndex,
+                fileName: currentFilename,
+                chunkIndex: chunkIdx + 1,
+                totalChunks,
+                fileProgress: fileProgress.toFixed(1),
+                overallProgress: uploadState.overallProgress,
+                currentFile: currentFileNumber,
+                totalFiles: fileCount,
+                status: response.data.status,
+                response: response.data
+              });
+            } catch (err) {
+              uploadError = err;
+            }
+          }
+        };
+        const concurrencyLimit = Math.min(config.maxConcurrentUploads || 5, chunksToUpload.length);
+        for (let i = 0; i < concurrencyLimit; i++) {
+          activePromises.push(runWorker());
         }
-        console.warn(uploadState);
-        const start = chunkIdx * chunkSize;
+        await Promise.all(activePromises);
+        if (uploadError) {
+          throw uploadError;
+        }
+      }
+      if (statusManager.isCancelled(uploadId)) {
+        abortController.abort();
+        uploadState.status = "cancelled";
+        await storage.storeProgress(uploadId, uploadState);
+        self.postMessage({
+          type: "cancelled",
+          uploadId,
+          message: "Upload cancelled by user"
+        });
+        return;
+      }
+      if (statusManager.isPaused(uploadId)) {
+        uploadState.status = "paused";
+        await storage.storeProgress(uploadId, uploadState);
+        self.postMessage({
+          type: "paused",
+          uploadId,
+          message: "Upload paused",
+          currentFileIndex: fileIndex,
+          currentChunkIndex: 0,
+          progress: uploadState.overallProgress
+        });
+        return;
+      }
+      const finalChunkIdx = totalChunks - 1;
+      const isFinalChunkCompleted = resumeUpload && completedChunksMap[`${fileIndex}_${finalChunkIdx}`] === true;
+      if (!isFinalChunkCompleted) {
+        const start = finalChunkIdx * chunkSize;
         const end = Math.min(start + chunkSize, currentBlob.size);
         const chunk = currentBlob.slice(start, end);
         const formData = new FormData();
         formData.append("sessionId", sessionId);
-        formData.append("chunkIndex", chunkIdx.toString());
+        formData.append("chunkIndex", finalChunkIdx.toString());
         formData.append("totalChunks", totalChunks.toString());
         formData.append("file", new Blob([chunk], { type: currentBlob.type }), currentFilename);
         formData.append("mimetype", currentBlob.type);
@@ -404,13 +619,26 @@ async function processFilesUpload(uploadId, blobArray, filenameArray, uploadStat
         formData.append("filename", currentFilename);
         formData.append("totalSize", currentBlob.size.toString());
         formData.append("uploadType", uploadState.uploadType || "default");
+        let checksum = "";
+        try {
+          const arrayBuffer = await currentBlob.arrayBuffer();
+          const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
+          const hashArray = Array.from(new Uint8Array(hashBuffer));
+          checksum = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+        } catch (hashErr) {
+          console.warn("[Worker] Failed to compute file cryptographic hash:", hashErr);
+        }
+        if (checksum) {
+          formData.append("checksum", checksum);
+          formData.append("signature", checksum);
+        }
         if (uploadState.transformer) {
           formData.append("transformer", JSON.stringify(uploadState.transformer));
         }
         if (uploadState.metadata && uploadState.metadata.length > 0) {
-          const metadata = uploadState.metadata[fileIndex];
-          if (metadata) {
-            Object.entries(metadata).forEach(([key, value]) => {
+          const metadataVal = uploadState.metadata[fileIndex];
+          if (metadataVal) {
+            Object.entries(metadataVal).forEach(([key, value]) => {
               if (typeof value === "object") {
                 formData.append(key, JSON.stringify(value));
               } else {
@@ -428,133 +656,72 @@ async function processFilesUpload(uploadId, blobArray, filenameArray, uploadStat
             }
           });
         }
+        let token = "";
         try {
-          let token = "";
-          try {
-            token = await getAuthToken();
-          } catch (error) {
-            console.warn("[Worker] Token request failed, continuing without authentication");
-          }
-          const response = await uploadChunk(
-            formData,
-            uploadState.endpoint || "/api/upload",
-            uploadState.method || "POST",
-            token,
-            uploadId,
-            abortController.signal
-          );
-          const validStatuses = ["success", "chunk_received"];
-          if (!response?.data || !validStatuses.includes(response.data.status)) {
-            throw new Error(response?.data?.message || "Chunk upload failed");
-          }
-          const progress = response.data.progress || (chunkIdx + 1) / totalChunks * 100;
-          uploadState.currentChunkIndex = chunkIdx + 1;
-          uploadState.status = "uploading";
-          uploadState.retryCount = 0;
-          const fileProgress = (chunkIdx + 1) / totalChunks * 100;
-          const totalProgress = (uploadState.completedFiles * 100 + fileProgress) / fileCount;
-          uploadState.overallProgress = totalProgress.toFixed(1);
+          token = await getAuthToken();
+        } catch (error) {
+          console.warn("[Worker] Token request failed, continuing without authentication");
+        }
+        const response = await uploadChunk(
+          formData,
+          uploadState.endpoint || "/api/upload",
+          uploadState.method || "POST",
+          token,
+          uploadId,
+          abortController.signal
+        );
+        if (statusManager.isCancelled(uploadId) || statusManager.isPaused(uploadId)) {
+          return;
+        }
+        if (response?.data?.error || response?.data?.status === "error") {
+          throw new Error(response?.data?.message || response?.data?.error || "Final chunk upload failed");
+        }
+        completedChunksMap[`${fileIndex}_${finalChunkIdx}`] = true;
+        uploadState.completedChunksMap = completedChunksMap;
+        const fileProgress = 100;
+        const totalProgress = (uploadState.completedFiles * 100 + fileProgress) / fileCount;
+        uploadState.overallProgress = Math.min(totalProgress, 100).toFixed(1);
+        await storage.storeProgress(uploadId, uploadState);
+        self.postMessage({
+          type: "progress",
+          uploadId,
+          fileIndex,
+          fileName: currentFilename,
+          chunkIndex: finalChunkIdx + 1,
+          totalChunks,
+          fileProgress: fileProgress.toFixed(1),
+          overallProgress: uploadState.overallProgress,
+          currentFile: currentFileNumber,
+          totalFiles: fileCount,
+          status: response.data.status,
+          response: response.data
+        });
+        if (response.data.status === "success") {
+          uploadState.status = "completed";
+          uploadState.overallProgress = "100.0";
+          uploadState.completedFiles = fileCount;
           await storage.storeProgress(uploadId, uploadState);
           self.postMessage({
-            type: "progress",
+            type: "success",
             uploadId,
-            fileIndex,
-            fileName: currentFilename,
-            chunkIndex: chunkIdx + 1,
-            totalChunks,
-            fileProgress: fileProgress.toFixed(1),
-            overallProgress: uploadState.overallProgress,
-            currentFile: currentFileNumber,
-            totalFiles: fileCount,
-            status: response.data.status,
-            response: response.data
+            status: "success",
+            message: response.data.message || `All ${fileCount} file(s) uploaded successfully.`,
+            data: response.data,
+            allFilesSessionId: uploadState.allFilesSessionId,
+            fileRecord: response.data.file,
+            url: response.data.url,
+            thumbnailUrl: response.data.thumbnailUrl
           });
-          if (response.data.status === "success") {
-            uploadState.status = "completed";
-            uploadState.overallProgress = "100.0";
-            uploadState.completedFiles = fileCount;
-            await storage.storeProgress(uploadId, uploadState);
-            self.postMessage({
-              type: "success",
-              uploadId,
-              status: "success",
-              message: response.data.message || `All ${fileCount} file(s) uploaded successfully.`,
-              data: response.data,
-              allFilesSessionId: uploadState.allFilesSessionId,
-              fileRecord: response.data.file,
-              url: response.data.url,
-              thumbnailUrl: response.data.thumbnailUrl
-            });
-            try {
-              await storage.clearUpload(uploadId, false);
-              statusManager.remove(uploadId);
-            } catch {
-            }
-            return;
+          try {
+            await storage.clearUpload(uploadId, false);
+            statusManager.remove(uploadId);
+          } catch {
           }
-          const isLastChunk = chunkIdx === totalChunks - 1;
-          const isLastFile = currentFileNumber === fileCount;
-          if (isLastChunk && isLastFile) {
-            uploadState.status = "completed";
-            uploadState.overallProgress = "100.0";
-            uploadState.completedFiles += 1;
-            await storage.storeProgress(uploadId, uploadState);
-            self.postMessage({
-              type: "success",
-              uploadId,
-              status: "success",
-              message: response.data.message || `All ${fileCount} file(s) uploaded successfully.`,
-              data: response.data,
-              allFilesSessionId: uploadState.allFilesSessionId,
-              fileRecord: response.data.file,
-              url: response.data.url,
-              thumbnailUrl: response.data.thumbnailUrl
-            });
-            try {
-              await storage.clearUpload(uploadId, false);
-              statusManager.remove(uploadId);
-            } catch {
-            }
-            return;
-          }
-          if (isLastChunk) {
-            uploadState.completedFiles += 1;
-            uploadState.currentChunkIndex = 0;
-            await storage.storeProgress(uploadId, uploadState);
-          }
-        } catch (error) {
-          if (error instanceof Error) {
-            const errorMessage = error.message.toLowerCase();
-            if (errorMessage.includes("paused")) {
-              uploadState.currentChunkIndex = chunkIdx;
-              uploadState.status = "paused";
-              await storage.storeProgress(uploadId, uploadState);
-              self.postMessage({
-                type: "paused",
-                uploadId,
-                message: "Upload paused",
-                currentFileIndex: fileIndex,
-                currentChunkIndex: chunkIdx,
-                progress: uploadState.overallProgress
-              });
-              return;
-            }
-            if (errorMessage.includes("cancelled")) {
-              uploadState.status = "cancelled";
-              await storage.storeProgress(uploadId, uploadState);
-              self.postMessage({
-                type: "cancelled",
-                uploadId,
-                message: "Upload cancelled"
-              });
-              return;
-            }
-            throw error;
-          } else {
-            throw error;
-          }
+          return;
         }
       }
+      uploadState.completedFiles += 1;
+      await storage.storeProgress(uploadId, uploadState);
     }
   } catch (error) {
     uploadState.status = "error";
@@ -741,6 +908,13 @@ self.addEventListener("message", async (event) => {
             const filenames = filenameArray || [];
             if (fileCount === 0) throw new Error("No files provided");
             if (filenames.length !== fileCount) throw new Error("Mismatch between files and filenames");
+            if (storageReady) {
+              const totalUploadBytes = blobArray.reduce(
+                (sum, blob) => sum + blob.size,
+                0
+              );
+              await storage.checkCapacityForUpload(totalUploadBytes, upId);
+            }
             uploadState = {
               uploadId: upId,
               fileCount,

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Media Test</title>
+    <link rel="stylesheet" href="/css/style.css">
+
+    <script>
+        window.process = { env: { NODE_ENV: 'development' } };
+    </script>
+
+    <script type="importmap">
+{
+    "imports": {
+        "@upload-media/client": "/node_modules/@upload-media/client/dist/index.mjs",
+        "@upload-media/client/worker": "/node_modules/@upload-media/client/dist/worker/upload.worker.mjs",
+        
+        "zustand": "/node_modules/zustand/esm/index.js",
+        "zustand/vanilla": "/node_modules/zustand/esm/vanilla.js",
+        "zustand/middleware": "/node_modules/zustand/esm/middleware.js",
+        "zustand/middleware/immer": "/node_modules/zustand/esm/middleware/immer.js",
+        
+        "immer": "/node_modules/immer/dist/immer.mjs",
+        "@ffmpeg/ffmpeg": "/node_modules/@ffmpeg/ffmpeg/dist/esm/index.js",
+        "@ffmpeg/util": "/node_modules/@ffmpeg/util/dist/esm/index.js"
+    }
+}
+</script>
+
+    <style>
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .btn.secondary {
+            background: #6b7280;
+        }
+
+        .btn.secondary:hover {
+            background: #4b5563;
+        }
+
+        .upload-mode {
+            display: inline-block;
+            padding: 8px 16px;
+            background: #f3f4f6;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            color: #6b7280;
+            margin-bottom: 10px;
+        }
+
+        .upload-mode.chunked {
+            border-left: 4px solid #3b82f6;
+        }
+
+        .upload-mode.direct {
+            border-left: 4px solid #8b5cf6;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>@upload-media Test Harness</h1>
+
+        <div class="card">
+            <h2>Select Files to Upload</h2>
+            <input type="file" id="fileInput" multiple>
+
+            <div id="dropZone" class="drop-zone">
+                Drag & Drop Files Here
+            </div>
+
+            <div style="margin-bottom: 15px; display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="simulateDropsCheckbox">
+                <label for="simulateDropsCheckbox" style="font-weight: bold; color: #dc2626; cursor: pointer;">
+                    ⚠️ Simulate Network Drops (40% Failure Rate)
+                </label>
+            </div>
+
+            <!-- ✅ Two upload buttons for testing -->
+            <div class="button-group">
+                <button id="uploadBtn" class="btn primary">
+                    📦 Upload Chunked (Via Worker)
+                </button>
+                <button id="uploadDirectBtn" class="btn secondary">
+                    📄 Upload Direct (Non-Chunked)
+                </button>
+                <button id="uploadFieldsBtn" class="btn primary" style="background: #eab308">
+                    🏷️ Multi-Field Upload (Named)
+                </button>
+                <button id="uploadTransBtn" class="btn primary" style="background: #10b981">
+                    ✨ Transformed Upload (Quality)
+                </button>
+                <button id="uploadMultiBtn" class="btn primary" style="background: #8b5cf6">
+                    💎 Multi-Quality Upload
+                </button>
+            </div>
+        </div>
+
+        <div id="uploadList" class="upload-list">
+            <!-- Progress bars will appear here -->
+        </div>
+
+        <!-- ✅ Gallery to show uploaded images -->
+        <div id="gallery" style="display: none;">
+            <h2>Uploaded Files</h2>
+            <div id="galleryContent" style="display: flex; flex-wrap: wrap;"></div>
+        </div>
+    </div>
+
+    <script src="/js/upload.js" type="module"></script>
+</body>
+
+</html>

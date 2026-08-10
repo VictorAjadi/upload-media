@@ -1,37 +1,32 @@
 /**
- * @upload-media/server - S3StorageAdapter
+ * @upload-media/server - S3StorageAdapter (v1.3 — Optimized)
  *
- * [1] assembleChunksToPath() implemented. UploadEngine calls this on
- *     the last chunk. The adapter streams each buffered S3 part to a
- *     temp file on disk so FFmpeg can read from disk rather than
- *     holding the full file in heap. The in-progress multipart upload
- *     is NOT finalized here — the engine calls finalize() separately
- *     after media processing, which completes the S3 multipart upload
- *     via CompleteMultipartUploadCommand.
+ * Fully optimized S3 multipart upload adapter with:
  *
- *     Because S3 does not expose already-uploaded parts for re-reading
- *     (without downloading the whole object), the adapter maintains a
- *     local part-buffer cache (partCache) in parallel so we can
- *     reconstruct the file for assembleChunksToPath without an extra
- *     S3 round-trip.
+ * [1] Configurable chunk cache strategy (`disk` | `memory`).
+ *     - `disk`: chunks spilled to temp files — O(1) heap, ideal for large media.
+ *     - `memory`: chunks held in RAM — lower latency, ideal for small files / serverless.
  *
- * [2] finalize() was already correct — it calls
- *     CompleteMultipartUploadCommand — but was never called by the
- *     engine. UploadEngine now calls finalize() after
- *     assembleChunksToPath + media processing (see UploadEngine fix).
- *     No change needed here; documented for clarity.
+ * [2] Zero double-write for raw (untransformed) uploads.
+ *     The multipart upload started during writeChunk() is finalized directly via
+ *     CompleteMultipartUploadCommand; the engine skips the redundant putStream re-upload.
  *
- * [3] StorageContext (including ctx.chunkCount) is now threaded through
- *     all methods consistently.
+ * [3] AbortMultipartUploadCommand on integrity failure / purge.
+ *     Prevents orphaned S3 parts from accruing storage charges.
  *
- * [4] partCache is cleared in finalize() and on abort to avoid unbounded
- *     memory growth for long-lived server processes with many uploads.
+ * [4] SDK module cached once — `require('@aws-sdk/client-s3')` called at most once
+ *     per process lifetime instead of per-method.
+ *
+ * [5] assembleChunksToPath() reads from the configured cache (disk or memory)
+ *     and streams to a temp file for FFmpeg/media processing.
+ *
+ * [6] Deterministic temp cleanup in finalize(), abortMultipart(), and on error.
  */
 
 import { Readable } from 'stream';
 import * as os from 'os';
 import * as path from 'path';
-import * as fsCb from 'fs';
+import * as fs from 'fs';
 import {
   StorageAdapter,
   StorageContext,
@@ -39,7 +34,9 @@ import {
   StorageWriteResult,
 } from '../../types';
 
-const MIN_S3_PART_SIZE = 5 * 1024 * 1024; // hard S3 requirement
+const MIN_S3_PART_SIZE = 5 * 1024 * 1024; // Hard S3 minimum for all but last part
+
+export type ChunkCacheStrategy = 'disk' | 'memory';
 
 export interface S3StorageOptions {
   bucket: string;
@@ -49,7 +46,7 @@ export interface S3StorageOptions {
     secretAccessKey: string;
     sessionToken?: string;
   };
-  /** For S3-compatible providers (Cloudflare R2, MinIO, etc.) */
+  /** For S3-compatible providers (Cloudflare R2, MinIO, DigitalOcean Spaces, etc.) */
   endpoint?: string;
   forcePathStyle?: boolean;
   /** Public URL builder; defaults to AWS virtual-hosted-style URL. */
@@ -64,10 +61,24 @@ export interface S3StorageOptions {
   /** Pass an already-constructed S3Client to skip credential config. */
   client?: any;
   /**
-   * Directory for temporary assembled files used during media processing.
+   * Directory for temporary assembled files and chunk cache (when using 'disk' strategy).
    * Defaults to os.tmpdir().
    */
   tempDir?: string;
+  /**
+   * Strategy for caching incoming chunks between writeChunk() and assembleChunksToPath().
+   *
+   * - `'disk'`   — Chunks are spilled to temp files. O(1) heap usage regardless of file
+   *                size. Best for large media (video/audio) or memory-constrained servers.
+   *
+   * - `'memory'` — Chunks are held in a Buffer[] array in heap memory. Lower latency
+   *                (no disk I/O), but heap grows proportionally with file size. Best for
+   *                small files (avatars/thumbnails) or short-lived serverless functions
+   *                where disk may be ephemeral or slow.
+   *
+   * Default: `'disk'`
+   */
+  chunkCacheStrategy?: ChunkCacheStrategy;
 }
 
 interface MultipartState {
@@ -78,48 +89,56 @@ interface MultipartState {
   /** Incoming engine-chunks buffered until they reach minPartSize. */
   buffer: Buffer[];
   bufferedBytes: number;
+  /** Total engine-chunks received (for validation). */
+  chunksReceived: number;
 }
 
 export class S3StorageAdapter implements StorageAdapter {
   readonly name = 's3';
   private options: S3StorageOptions;
-  private _client: any;
+  private _client: any = null;
+  private _sdk: any = null;
   private minPartSize: number;
   private tempDir: string;
+  private cacheStrategy: ChunkCacheStrategy;
 
   /** Active multipart uploads keyed by fileId. */
   private uploads = new Map<string, MultipartState>();
 
   /**
-   * Parallel cache of the raw engine-chunks (before S3-part
-   * buffering) so assembleChunksToPath() can reconstruct the file
-   * without downloading from S3.
+   * In-memory chunk cache (only used when cacheStrategy === 'memory').
+   * Maps fileId -> sparse Buffer[] indexed by chunkNumber.
    */
-  private partCache = new Map<string, Buffer[]>();
+  private memoryCache = new Map<string, Buffer[]>();
 
   constructor(options: S3StorageOptions) {
     this.options = options;
     this.minPartSize = options.minPartSize ?? MIN_S3_PART_SIZE;
     this.tempDir = options.tempDir ?? os.tmpdir();
+    this.cacheStrategy = options.chunkCacheStrategy ?? 'disk';
   }
 
-  // ── SDK lazy-loader ──────────────────────────────────────────────────────
+  // ── SDK lazy-loader (Fix 5: cached once per process) ────────────────────────
 
-  private async getClient(): Promise<any> {
-    if (this.options.client) return this.options.client;
-    if (this._client) return this._client;
-
-    let S3Client: any;
+  private loadSDK(): any {
+    if (this._sdk) return this._sdk;
     try {
-      ({ S3Client } = require('@aws-sdk/client-s3'));
+      this._sdk = require('@aws-sdk/client-s3');
+      return this._sdk;
     } catch {
       throw new Error(
         '[upload-media/server] S3StorageAdapter requires "@aws-sdk/client-s3". ' +
         'Install it with: npm install @aws-sdk/client-s3',
       );
     }
+  }
 
-    this._client = new S3Client({
+  private getClient(): any {
+    if (this.options.client) return this.options.client;
+    if (this._client) return this._client;
+
+    const sdk = this.loadSDK();
+    this._client = new sdk.S3Client({
       region: this.options.region,
       credentials: this.options.credentials,
       endpoint: this.options.endpoint,
@@ -128,25 +147,14 @@ export class S3StorageAdapter implements StorageAdapter {
     return this._client;
   }
 
-  private async loadCommands(): Promise<any> {
-    try {
-      return require('@aws-sdk/client-s3');
-    } catch {
-      throw new Error(
-        '[upload-media/server] S3StorageAdapter requires "@aws-sdk/client-s3". ' +
-        'Install it with: npm install @aws-sdk/client-s3',
-      );
-    }
-  }
-
   // ── Key / URL builders ───────────────────────────────────────────────────
 
-  private buildKey(fileId: string, ctx: StorageContext): string {
+  private resolveKey(fileId: string, ctx: StorageContext): string {
     if (this.options.buildKey) return this.options.buildKey(fileId, ctx);
     return `${ctx.bucket}/${fileId}`;
   }
 
-  private buildPublicUrl(key: string): string {
+  private resolvePublicUrl(key: string): string {
     if (this.options.buildPublicUrl) {
       return this.options.buildPublicUrl(this.options.bucket, key);
     }
@@ -156,15 +164,64 @@ export class S3StorageAdapter implements StorageAdapter {
     return `https://${this.options.bucket}.s3.${this.options.region}.amazonaws.com/${key}`;
   }
 
+  // ── Chunk cache helpers (Fix 2: configurable disk | memory) ─────────────
+
+  private chunkCachePath(fileId: string, chunkNumber: number): string {
+    return path.join(this.tempDir, `s3_cache_${fileId}_${chunkNumber}.bin`);
+  }
+
+  private async cacheChunk(fileId: string, chunkNumber: number, data: Buffer): Promise<void> {
+    if (this.cacheStrategy === 'memory') {
+      if (!this.memoryCache.has(fileId)) this.memoryCache.set(fileId, []);
+      this.memoryCache.get(fileId)![chunkNumber] = data;
+    } else {
+      await fs.promises.mkdir(this.tempDir, { recursive: true });
+      await fs.promises.writeFile(this.chunkCachePath(fileId, chunkNumber), data);
+    }
+  }
+
+  private async readCachedChunk(fileId: string, chunkNumber: number): Promise<Buffer> {
+    if (this.cacheStrategy === 'memory') {
+      const cache = this.memoryCache.get(fileId);
+      if (!cache || !cache[chunkNumber]) {
+        throw new Error(`[S3StorageAdapter] Missing cached chunk ${chunkNumber} for file "${fileId}" (memory)`);
+      }
+      return cache[chunkNumber];
+    } else {
+      const p = this.chunkCachePath(fileId, chunkNumber);
+      try {
+        return await fs.promises.readFile(p);
+      } catch {
+        throw new Error(`[S3StorageAdapter] Missing cached chunk ${chunkNumber} for file "${fileId}" (disk: ${p})`);
+      }
+    }
+  }
+
+  private async cleanupCache(fileId: string, totalChunks?: number): Promise<void> {
+    if (this.cacheStrategy === 'memory') {
+      this.memoryCache.delete(fileId);
+    } else {
+      // Best-effort cleanup of chunk files
+      const count = totalChunks ?? 10000; // upper bound scan
+      const toDelete: Promise<void>[] = [];
+      for (let i = 0; i < count; i++) {
+        const p = this.chunkCachePath(fileId, i);
+        toDelete.push(fs.promises.unlink(p).catch(() => {}));
+      }
+      await Promise.all(toDelete);
+    }
+  }
+
   // ── Part flusher ─────────────────────────────────────────────────────────
 
   private async flushPart(
     state: MultipartState,
-    sdk: any,
-    client: any,
     isFinal: boolean,
   ): Promise<void> {
     if (state.bufferedBytes === 0) return;
+
+    const sdk = this.loadSDK();
+    const client = this.getClient();
 
     const body = Buffer.concat(state.buffer, state.bufferedBytes);
     state.buffer = [];
@@ -192,16 +249,15 @@ export class S3StorageAdapter implements StorageAdapter {
     data: Buffer,
     ctx: StorageContext,
   ): Promise<void> {
-    const sdk = await this.loadCommands();
-    const client = await this.getClient();
+    const sdk = this.loadSDK();
+    const client = this.getClient();
 
-    // FIX [1]: cache raw chunk for assembleChunksToPath
-    if (!this.partCache.has(fileId)) this.partCache.set(fileId, []);
-    this.partCache.get(fileId)![chunkNumber] = data;
+    // Cache chunk for later assembly (disk or memory per config)
+    await this.cacheChunk(fileId, chunkNumber, data);
 
     let state = this.uploads.get(fileId);
     if (!state) {
-      const key = this.buildKey(fileId, ctx);
+      const key = this.resolveKey(fileId, ctx);
       const created = await client.send(
         new sdk.CreateMultipartUploadCommand({
           Bucket: this.options.bucket,
@@ -216,22 +272,21 @@ export class S3StorageAdapter implements StorageAdapter {
         parts: [],
         buffer: [],
         bufferedBytes: 0,
+        chunksReceived: 0,
       };
       this.uploads.set(fileId, state);
     }
 
+    state.chunksReceived += 1;
     state.buffer.push(data);
     state.bufferedBytes += data.length;
 
     if (state.bufferedBytes >= this.minPartSize) {
-      await this.flushPart(state, sdk, client, false);
+      await this.flushPart(state, false);
     }
   }
 
-  // ── assembleChunksToPath  ───────────────────────────────────────
-  //
-  // Reads cached engine-chunks in order and writes them to a temp file.
-  // The multipart upload on S3 is left open; finalize() completes it.
+  // ── assembleChunksToPath (Fix 2: reads from disk or memory cache) ───────
 
   async assembleChunksToPath(
     fileId: string,
@@ -239,16 +294,8 @@ export class S3StorageAdapter implements StorageAdapter {
     ext: string,
     ctx: StorageContext,
   ): Promise<string> {
-    const cache = this.partCache.get(fileId);
-    if (!cache || cache.length < totalChunks) {
-      throw new Error(
-        `[S3StorageAdapter] Part cache incomplete for fileId "${fileId}" ` +
-        `(have ${cache?.length ?? 0}, need ${totalChunks})`,
-      );
-    }
-
     const dest = path.join(this.tempDir, `${fileId}_assembled${ext}`);
-    const writeStream = fsCb.createWriteStream(dest);
+    const writeStream = fs.createWriteStream(dest);
 
     await new Promise<void>((resolve, reject) => {
       writeStream.on('error', reject);
@@ -257,12 +304,7 @@ export class S3StorageAdapter implements StorageAdapter {
       (async () => {
         try {
           for (let i = 0; i < totalChunks; i++) {
-            const buf = cache[i];
-            if (!buf) {
-              throw new Error(
-                `[S3StorageAdapter] Missing cached chunk ${i} for file "${fileId}"`,
-              );
-            }
+            const buf = await this.readCachedChunk(fileId, i);
             const ok = writeStream.write(buf);
             if (!ok) await new Promise<void>((r) => writeStream.once('drain', r));
           }
@@ -277,11 +319,11 @@ export class S3StorageAdapter implements StorageAdapter {
     return dest;
   }
 
-  // ── finalize (FIX [2]) ───────────────────────────────────────────────────
+  // ── finalize (Fix 1, 6: complete S3 multipart + cleanup cache) ──────────
 
   async finalize(fileId: string, ctx: StorageContext): Promise<StorageWriteResult> {
-    const sdk = await this.loadCommands();
-    const client = await this.getClient();
+    const sdk = this.loadSDK();
+    const client = this.getClient();
     const state = this.uploads.get(fileId);
 
     if (!state) {
@@ -291,7 +333,7 @@ export class S3StorageAdapter implements StorageAdapter {
     }
 
     // Flush whatever remains — the last part is allowed to be under 5 MB.
-    await this.flushPart(state, sdk, client, true);
+    await this.flushPart(state, true);
 
     await client.send(
       new sdk.CompleteMultipartUploadCommand({
@@ -302,13 +344,49 @@ export class S3StorageAdapter implements StorageAdapter {
       }),
     );
 
-    this.uploads.delete(fileId);
-    this.partCache.delete(fileId); // FIX [4]: release memory
-
-    return {
+    const result: StorageWriteResult = {
       storageRef: state.key,
-      url: this.buildPublicUrl(state.key),
+      url: this.resolvePublicUrl(state.key),
     };
+
+    // Deterministic cleanup
+    this.uploads.delete(fileId);
+    await this.cleanupCache(fileId, state.chunksReceived).catch(() => {});
+
+    return result;
+  }
+
+  // ── abortMultipart (Fix 3: abort S3 multipart + purge cache) ────────────
+
+  async abortMultipart(fileId: string): Promise<void> {
+    const state = this.uploads.get(fileId);
+    if (!state) return; // Nothing to abort
+
+    const sdk = this.loadSDK();
+    const client = this.getClient();
+
+    try {
+      await client.send(
+        new sdk.AbortMultipartUploadCommand({
+          Bucket: this.options.bucket,
+          Key: state.key,
+          UploadId: state.uploadId,
+        }),
+      );
+    } catch (err) {
+      console.warn(`[S3StorageAdapter] AbortMultipartUpload failed for "${fileId}":`, err);
+    }
+
+    this.uploads.delete(fileId);
+    await this.cleanupCache(fileId, state.chunksReceived).catch(() => {});
+  }
+
+  /**
+   * Returns true if this adapter has an active multipart upload for the given fileId
+   * that can be finalized directly (no re-upload needed for raw files).
+   */
+  hasActiveMultipart(fileId: string): boolean {
+    return this.uploads.has(fileId);
   }
 
   // ── putStream ────────────────────────────────────────────────────────────
@@ -318,11 +396,10 @@ export class S3StorageAdapter implements StorageAdapter {
     stream: Readable,
     ctx: StorageContext,
   ): Promise<StorageWriteResult> {
-    const sdk = await this.loadCommands();
-    const client = await this.getClient();
-    const key = this.buildKey(fileId, ctx);
+    const sdk = this.loadSDK();
+    const client = this.getClient();
+    const key = this.resolveKey(fileId, ctx);
 
-    // Let the AWS SDK handle stream uploading.
     await client.send(
       new sdk.PutObjectCommand({
         Bucket: this.options.bucket,
@@ -332,7 +409,7 @@ export class S3StorageAdapter implements StorageAdapter {
       }),
     );
 
-    return { storageRef: key, url: this.buildPublicUrl(key) };
+    return { storageRef: key, url: this.resolvePublicUrl(key) };
   }
 
   // ── putObject ────────────────────────────────────────────────────────────
@@ -342,9 +419,9 @@ export class S3StorageAdapter implements StorageAdapter {
     data: Buffer,
     ctx: StorageContext,
   ): Promise<StorageWriteResult> {
-    const sdk = await this.loadCommands();
-    const client = await this.getClient();
-    const key = this.buildKey(fileId, ctx);
+    const sdk = this.loadSDK();
+    const client = this.getClient();
+    const key = this.resolveKey(fileId, ctx);
 
     await client.send(
       new sdk.PutObjectCommand({
@@ -355,14 +432,14 @@ export class S3StorageAdapter implements StorageAdapter {
       }),
     );
 
-    return { storageRef: key, url: this.buildPublicUrl(key) };
+    return { storageRef: key, url: this.resolvePublicUrl(key) };
   }
 
   // ── readStream ───────────────────────────────────────────────────────────
 
   async readStream(ref: string, options?: StorageReadOptions): Promise<Readable> {
-    const sdk = await this.loadCommands();
-    const client = await this.getClient();
+    const sdk = this.loadSDK();
+    const client = this.getClient();
 
     const range =
       options?.start !== undefined || options?.end !== undefined
@@ -383,8 +460,8 @@ export class S3StorageAdapter implements StorageAdapter {
   // ── delete ───────────────────────────────────────────────────────────────
 
   async delete(ref: string): Promise<void> {
-    const sdk = await this.loadCommands();
-    const client = await this.getClient();
+    const sdk = this.loadSDK();
+    const client = this.getClient();
     await client.send(
       new sdk.DeleteObjectCommand({ Bucket: this.options.bucket, Key: ref }),
     );

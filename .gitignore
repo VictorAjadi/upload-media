@@ -1,5 +1,10 @@
-node_modules
-uploads
+/node_modules
+/uploads
+/temp-uploads
 package-lock.json
 .env
 .DS_Store
+dist
+test-app-*/node_modules/
+test-app-*/uploads/
+test-app-*/temp-uploads/
