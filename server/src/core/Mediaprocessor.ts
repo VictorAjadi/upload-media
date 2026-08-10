@@ -1038,10 +1038,16 @@ export class MediaProcessor {
             cmd = cmd.format(outputFormat).output(outputPath);
 
             let timer: NodeJS.Timeout | null = null;
+            // Guard against fluent-ffmpeg's known double-fire of error+exit events.
+            // Once the promise is settled, subsequent resolve/reject calls are no-ops.
+            let settled = false;
+            const safeResolve = () => { if (!settled) { settled = true; if (timer) clearTimeout(timer); resolve(); } };
+            const safeReject = (err: Error) => { if (!settled) { settled = true; if (timer) clearTimeout(timer); reject(err); } };
+
             if (this.timeoutMs > 0) {
                 timer = setTimeout(() => {
                     try { cmd.kill('SIGKILL'); } catch { }
-                    reject(new Error(
+                    safeReject(new Error(
                         `[MediaProcessor] FFmpeg timed out after ${this.timeoutMs / 1000}s ` +
                         `encoding variant (crf=${q.crf}, preset=${preset}, ` +
                         `res=${q.width ?? '?'}x${q.height ?? '?'}).`,
@@ -1055,8 +1061,8 @@ export class MediaProcessor {
                         try { config.onProgress({ ...progress, variantId: qc?.id ?? 'single' }); } catch { }
                     }
                 })
-                .on('end', () => { if (timer) clearTimeout(timer); resolve(); })
-                .on('error', (err: Error) => { if (timer) clearTimeout(timer); reject(err); })
+                .on('end', () => safeResolve())
+                .on('error', (err: Error) => safeReject(err))
                 .run();
         });
     }
@@ -1237,16 +1243,20 @@ export class MediaProcessor {
             cmd = cmd.format(outputFormat).output(outputPath);
 
             let timer: NodeJS.Timeout | null = null;
+            let settled = false;
+            const safeResolve = () => { if (!settled) { settled = true; if (timer) clearTimeout(timer); resolve(); } };
+            const safeReject = (err: Error) => { if (!settled) { settled = true; if (timer) clearTimeout(timer); reject(err); } };
+
             if (this.timeoutMs > 0) {
                 timer = setTimeout(() => {
                     try { cmd.kill('SIGKILL'); } catch { }
-                    reject(new Error(`[MediaProcessor] FFmpeg audio timed out after ${this.timeoutMs / 1000}s`));
+                    safeReject(new Error(`[MediaProcessor] FFmpeg audio timed out after ${this.timeoutMs / 1000}s`));
                 }, this.timeoutMs);
             }
 
             cmd
-                .on('end', () => { if (timer) clearTimeout(timer); resolve(); })
-                .on('error', (err: Error) => { if (timer) clearTimeout(timer); reject(err); })
+                .on('end', () => safeResolve())
+                .on('error', (err: Error) => safeReject(err))
                 .run();
         });
     }
@@ -1298,8 +1308,9 @@ export class MediaProcessor {
             }
 
             const outputPath = tmp.create('.jpg', variantId);
+            let settled = false;
             const timer = setTimeout(
-                () => reject(new Error('[MediaProcessor] Thumbnail timed out after 30s')), 30_000,
+                () => { if (!settled) { settled = true; reject(new Error('[MediaProcessor] Thumbnail timed out after 30s')); } }, 30_000,
             );
 
             this.ffmpeg(inputPath)
@@ -1312,13 +1323,15 @@ export class MediaProcessor {
                 ])
                 .output(outputPath)
                 .on('end', async () => {
+                    if (settled) return;
+                    settled = true;
                     clearTimeout(timer);
                     try {
                         const raw = await fs.promises.readFile(outputPath);
                         resolve(this.sharp ? await this.sharp(raw).jpeg({ quality: 80, mozjpeg: true }).toBuffer() : raw);
                     } catch (err) { reject(err); }
                 })
-                .on('error', (err: Error) => { clearTimeout(timer); reject(err); })
+                .on('error', (err: Error) => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } })
                 .run();
         });
     }

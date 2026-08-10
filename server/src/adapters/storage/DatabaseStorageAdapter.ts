@@ -144,6 +144,7 @@ export class DatabaseStorageAdapter implements StorageAdapter {
 
       (async () => {
         try {
+          let totalBytesWritten = 0;
           for (let i = 0; i < totalChunks; i++) {
             const raw = await this.database.getChunk!(fileId, i);
             if (!raw) {
@@ -151,8 +152,15 @@ export class DatabaseStorageAdapter implements StorageAdapter {
                 `[DatabaseStorageAdapter] Missing chunk ${i} for file "${fileId}"`,
               );
             }
+            // Diagnostic: log type and size of raw chunk data for first few and last chunk
+            if (i < 3 || i === totalChunks - 1) {
+              const rawType = raw?.constructor?.name ?? typeof raw;
+              const rawLen = Buffer.isBuffer(raw) ? raw.length
+                : (raw as any)?.buffer?.length ?? (raw as any)?.length?.() ?? '?';
+            }
             const buf = toBuffer(raw);
             const ok = writeStream.write(buf);
+            totalBytesWritten += buf.length;
             if (!ok) await new Promise<void>((r) => writeStream.once('drain', r));
           }
           writeStream.end();
@@ -286,11 +294,11 @@ export class DatabaseStorageAdapter implements StorageAdapter {
         // Synchronously extract exactly chunkSize bytes across the buffered chunks
         let collected = 0;
         const pieces: Buffer[] = [];
-        
+
         while (collected < chunkSize && pending.length > 0) {
           const first = pending[0];
           const needed = chunkSize - collected;
-          
+
           if (first.length <= needed) {
             pieces.push(first);
             collected += first.length;
@@ -303,9 +311,9 @@ export class DatabaseStorageAdapter implements StorageAdapter {
             pendingLength -= needed;
           }
         }
-        
+
         const piece = pieces.length === 1 ? pieces[0] : Buffer.concat(pieces, chunkSize);
-        
+
         batch.push({ fileId, chunkNumber, data: Buffer.from(piece) });
         chunkNumber += 1;
         totalBytes += piece.length;

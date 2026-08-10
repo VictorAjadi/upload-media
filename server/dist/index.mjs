@@ -81,6 +81,7 @@ function getMimeKind(contentType) {
 // src/core/UploadEngine.ts
 import * as fs2 from "fs";
 import * as path2 from "path";
+import * as crypto from "crypto";
 
 // src/config/UploadConfig.ts
 var ConfigValidationError = class extends Error {
@@ -1462,13 +1463,28 @@ var MediaProcessor = class {
       }
       cmd = cmd.format(outputFormat).output(outputPath);
       let timer = null;
+      let settled = false;
+      const safeResolve = () => {
+        if (!settled) {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          resolve();
+        }
+      };
+      const safeReject = (err) => {
+        if (!settled) {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          reject(err);
+        }
+      };
       if (this.timeoutMs > 0) {
         timer = setTimeout(() => {
           try {
             cmd.kill("SIGKILL");
           } catch {
           }
-          reject(new Error(
+          safeReject(new Error(
             `[MediaProcessor] FFmpeg timed out after ${this.timeoutMs / 1e3}s encoding variant (crf=${q.crf}, preset=${preset}, res=${q.width ?? "?"}x${q.height ?? "?"}).`
           ));
         }, this.timeoutMs);
@@ -1480,13 +1496,7 @@ var MediaProcessor = class {
           } catch {
           }
         }
-      }).on("end", () => {
-        if (timer) clearTimeout(timer);
-        resolve();
-      }).on("error", (err) => {
-        if (timer) clearTimeout(timer);
-        reject(err);
-      }).run();
+      }).on("end", () => safeResolve()).on("error", (err) => safeReject(err)).run();
     });
   }
   // ── Audio processing ──────────────────────────────────────────────────────
@@ -1657,22 +1667,31 @@ var MediaProcessor = class {
       }
       cmd = cmd.format(outputFormat).output(outputPath);
       let timer = null;
+      let settled = false;
+      const safeResolve = () => {
+        if (!settled) {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          resolve();
+        }
+      };
+      const safeReject = (err) => {
+        if (!settled) {
+          settled = true;
+          if (timer) clearTimeout(timer);
+          reject(err);
+        }
+      };
       if (this.timeoutMs > 0) {
         timer = setTimeout(() => {
           try {
             cmd.kill("SIGKILL");
           } catch {
           }
-          reject(new Error(`[MediaProcessor] FFmpeg audio timed out after ${this.timeoutMs / 1e3}s`));
+          safeReject(new Error(`[MediaProcessor] FFmpeg audio timed out after ${this.timeoutMs / 1e3}s`));
         }, this.timeoutMs);
       }
-      cmd.on("end", () => {
-        if (timer) clearTimeout(timer);
-        resolve();
-      }).on("error", (err) => {
-        if (timer) clearTimeout(timer);
-        reject(err);
-      }).run();
+      cmd.on("end", () => safeResolve()).on("error", (err) => safeReject(err)).run();
     });
   }
   // ── Thumbnail generation ──────────────────────────────────────────────────
@@ -1714,14 +1733,22 @@ var MediaProcessor = class {
         }
       }
       const outputPath = tmp.create(".jpg", variantId);
+      let settled = false;
       const timer = setTimeout(
-        () => reject(new Error("[MediaProcessor] Thumbnail timed out after 30s")),
+        () => {
+          if (!settled) {
+            settled = true;
+            reject(new Error("[MediaProcessor] Thumbnail timed out after 30s"));
+          }
+        },
         3e4
       );
       this.ffmpeg(inputPath).seekInput(seekTime).frames(1).videoFilters("scale=320:180:flags=fast_bilinear:force_original_aspect_ratio=decrease").outputOptions([
         "-q:v 4",
         "-update 1"
       ]).output(outputPath).on("end", async () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         try {
           const raw = await fs.promises.readFile(outputPath);
@@ -1730,8 +1757,11 @@ var MediaProcessor = class {
           reject(err);
         }
       }).on("error", (err) => {
-        clearTimeout(timer);
-        reject(err);
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
       }).run();
     });
   }
@@ -1907,7 +1937,14 @@ var UploadEngine = class {
     if (!parsed.files || parsed.files.length === 0)
       throw new ValidationError("No chunk data received", 400);
     const chunkFile = parsed.files[0];
-    const chunkBuffer = ensureBuffer2(chunkFile.buffer);
+    let chunkBuffer;
+    if (chunkFile.tempFilePath) {
+      chunkBuffer = await fs2.promises.readFile(chunkFile.tempFilePath);
+      await fs2.promises.unlink(chunkFile.tempFilePath).catch(() => {
+      });
+    } else {
+      chunkBuffer = ensureBuffer2(chunkFile.buffer);
+    }
     const kind = detectKind(mimetype);
     assertKindAllowed(kind, typeConfig);
     assertWithinLimit(chunkBuffer.length, resolveSizeLimit(this.config, typeConfig, kind), "File size");
@@ -1915,7 +1952,8 @@ var UploadEngine = class {
     const actualChunkSize = chunkBuffer.length;
     let existingFile = null;
     if (this.config.database) existingFile = await this.config.database.getFileBySessionId(sessionId);
-    const fileId = existingFile?.id ?? this.generateFileId();
+    const deterministicId = `file_${crypto.createHash("md5").update(sessionId).digest("hex").substring(0, 16)}`;
+    const fileId = existingFile?.id ?? deterministicId;
     const isLastChunk = chunkIndex === totalChunks - 1;
     const storageCtx = {
       originalName: filename,
@@ -1984,164 +2022,171 @@ var UploadEngine = class {
         inputExt,
         storageCtx
       );
-      let finalMimeType = mimetype;
-      let finalFilename = filename;
-      if (transformer && this.shouldProcessMedia(mimetype, transformer, storage)) {
-        try {
-          processedResult = await this.processMediaFromPath(
-            assembledPath,
-            mimetype,
-            filename,
-            transformer
+      try {
+        const stat = await fs2.promises.stat(assembledPath);
+        console.log(
+          `[UploadEngine] Assembled file: ${assembledPath} (${stat.size} bytes, expected ~${actualTotalSize} bytes, ${totalChunks} chunks)`
+        );
+        if (stat.size === 0) {
+          throw new Error(`[UploadEngine] Assembled file is 0 bytes \u2014 chunk data may be corrupt`);
+        }
+        if (actualTotalSize > 0 && Math.abs(stat.size - actualTotalSize) > actualChunkSize) {
+          console.warn(
+            `[UploadEngine] \u26A0\uFE0F Assembled file size mismatch: got ${stat.size}, expected ~${actualTotalSize} (delta: ${Math.abs(stat.size - actualTotalSize)} bytes)`
           );
-          if (processedResult) {
-            finalMimeType = processedResult.mimeType;
-            finalFilename = replaceExtension(filename, `.${processedResult.extension}`);
-          }
-        } catch (processingError) {
-          console.error("[UploadEngine] Media processing failed, storing raw:", processingError);
-          processedResult = null;
         }
+      } catch (statErr) {
+        if (statErr.code === "ENOENT") throw new Error(`[UploadEngine] Assembled file not found at ${assembledPath}`);
+        if (statErr.message?.includes("0 bytes")) throw statErr;
+        console.warn("[UploadEngine] Assembly stat check warning:", statErr.message);
       }
-      const variantResults = {};
-      const variantFileIds = {};
-      let finalUrl;
-      let finalStorageRef;
-      let primaryEncodedSize = actualTotalSize;
-      let primaryChunkCount = 1;
-      let primaryChunkSize = actualChunkSize;
-      if (processedResult?.variantPaths && Object.keys(processedResult.variantPaths).length > 0) {
-        const entries = Object.entries(processedResult.variantPaths);
-        await Promise.all(entries.map(async ([qualityId, variantPath], i) => {
-          const isPrimary = i === 0;
-          const variantFileId = isPrimary ? fileId : buildVariantFileId(fileId, qualityId);
-          const variantFilename = buildVariantFilename(filename, qualityId, processedResult.extension);
-          const variantCtx = {
-            ...storageCtx,
-            originalName: variantFilename,
-            contentType: processedResult.mimeType
-          };
-          const vr = await streamFileToStorage(storage, variantFileId, variantPath, variantCtx);
-          if (isPrimary) {
-            finalUrl = vr.url;
-            finalStorageRef = vr.storageRef;
-            primaryEncodedSize = vr.totalSize;
-            primaryChunkCount = vr.chunkCount;
-            primaryChunkSize = vr.chunkSize;
-          }
-          variantResults[qualityId] = { url: vr.url, storageRef: vr.storageRef, fileId: variantFileId };
-          if (!isPrimary) {
-            variantFileIds[qualityId] = variantFileId;
-            if (this.config.database) {
-              const vRecord = await this.config.database.createFile({
-                id: variantFileId,
-                sessionId: `${sessionId}_${qualityId}`,
-                originalName: variantFilename,
-                storedName: this.sanitizeFilename(variantFilename),
-                fieldname: parsed.fields.fieldname || "file",
-                contentType: processedResult.mimeType,
-                kind,
-                size: vr.totalSize,
-                chunkSize: vr.chunkSize,
-                chunkCount: vr.chunkCount,
-                uploadType,
-                bucket: typeConfig.bucket || uploadType,
-                storageProvider: resolveStorageKey(this.config, typeConfig),
-                storageRef: vr.storageRef,
-                url: vr.url,
-                isComplete: true,
-                metadata: { parentFileId: fileId, quality: qualityId, isVariant: true }
-              });
-              this.config.onUploadComplete?.(vRecord);
-            }
-          }
-        }));
-      } else {
-        const sourcePath = processedResult?.outputPath ?? assembledPath;
-        const singleCtx = {
-          ...storageCtx,
-          originalName: finalFilename,
-          contentType: finalMimeType
-        };
-        const sr = await streamFileToStorage(storage, fileId, sourcePath, singleCtx);
-        finalUrl = sr.url;
-        finalStorageRef = sr.storageRef;
-        primaryEncodedSize = sr.totalSize;
-        primaryChunkCount = sr.chunkCount;
-        primaryChunkSize = sr.chunkSize;
-      }
-      let thumbnailUrl;
-      let thumbnailStorageRef;
-      if (processedResult?.thumbnail && storage.putObject) {
-        try {
-          const thumbId = `thumb_${fileId}`;
-          const thumbCtx = {
-            ...storageCtx,
-            originalName: `${path2.basename(filename, path2.extname(filename))}_thumb.jpg`,
-            contentType: "image/jpeg"
-          };
-          const tr = await storage.putObject(thumbId, processedResult.thumbnail, thumbCtx);
-          thumbnailUrl = tr.url;
-          thumbnailStorageRef = tr.storageRef;
-        } catch (e) {
-          console.warn("[UploadEngine] Thumbnail upload failed:", e);
-        }
-      }
+      const singleCtx = {
+        ...storageCtx,
+        originalName: filename,
+        contentType: mimetype
+      };
+      const rawStorageResult = await streamFileToStorage(storage, fileId, assembledPath, singleCtx);
       let finalFileRecord = null;
       if (this.config.database) {
         finalFileRecord = await this.config.database.updateFile(fileId, {
           isComplete: true,
-          storageRef: finalStorageRef,
-          url: finalUrl,
-          contentType: finalMimeType,
-          originalName: finalFilename,
-          storedName: this.sanitizeFilename(finalFilename),
-          size: primaryEncodedSize,
-          chunkCount: primaryChunkCount,
-          chunkSize: primaryChunkSize,
-          thumbnailUrl,
-          thumbnailRef: thumbnailStorageRef,
-          ...Object.keys(variantFileIds).length > 0 ? { variantFileIds } : {},
+          // Marked complete so client can consume original raw file
+          storageRef: rawStorageResult.storageRef,
+          url: rawStorageResult.url,
+          contentType: mimetype,
+          originalName: filename,
+          storedName: this.sanitizeFilename(filename),
+          size: actualTotalSize,
+          chunkCount: totalChunks,
+          chunkSize: actualChunkSize,
           updatedAt: Date.now()
         });
       } else {
         finalFileRecord = {
           id: fileId,
           sessionId,
-          originalName: finalFilename,
-          storedName: this.sanitizeFilename(finalFilename),
+          originalName: filename,
+          storedName: this.sanitizeFilename(filename),
           fieldname: parsed.fields.fieldname || "file",
-          contentType: finalMimeType,
-          kind,
-          size: primaryEncodedSize,
-          chunkSize: primaryChunkSize,
-          chunkCount: primaryChunkCount,
+          contentType: mimetype,
+          kind: detectKind(mimetype),
+          size: actualTotalSize,
+          chunkSize: actualChunkSize,
+          chunkCount: totalChunks,
           uploadType,
           bucket: typeConfig.bucket || uploadType,
           storageProvider: resolveStorageKey(this.config, typeConfig),
-          storageRef: finalStorageRef,
-          url: finalUrl,
-          thumbnailUrl,
+          storageRef: rawStorageResult.storageRef,
+          url: rawStorageResult.url,
           isComplete: true,
           createdAt: Date.now(),
-          updatedAt: Date.now(),
-          ...Object.keys(variantFileIds).length > 0 ? { variantFileIds } : {}
+          updatedAt: Date.now()
         };
+      }
+      if (transformer && this.shouldProcessMedia(mimetype, transformer, storage)) {
+        Promise.resolve().then(async () => {
+          let processedResult2 = null;
+          try {
+            processedResult2 = await this.processMediaFromPath(assembledPath, mimetype, filename, transformer, fileId, sessionId);
+            if (!processedResult2) return;
+            const variantFileIds = {};
+            let thumbnailUrl;
+            if (processedResult2.thumbnail && storage.putObject) {
+              try {
+                const thumbId = `thumb_${fileId}`;
+                const thumbCtx = {
+                  ...storageCtx,
+                  originalName: `${path2.basename(filename, path2.extname(filename))}_thumb.jpg`,
+                  contentType: "image/jpeg"
+                };
+                const tr = await storage.putObject(thumbId, processedResult2.thumbnail, thumbCtx);
+                thumbnailUrl = tr.url;
+                await this.config.database?.updateFile(fileId, { thumbnailUrl, thumbnailRef: tr.storageRef });
+              } catch (e) {
+                console.warn("[UploadEngine] Thumbnail upload failed:", e);
+              }
+            }
+            if (processedResult2.variantPaths && Object.keys(processedResult2.variantPaths).length > 0) {
+              const entries = Object.entries(processedResult2.variantPaths);
+              await Promise.all(entries.map(async ([qualityId, variantPath], i) => {
+                const isPrimary = i === 0;
+                const variantFileId = isPrimary ? fileId : buildVariantFileId(fileId, qualityId);
+                const variantFilename = buildVariantFilename(filename, qualityId, processedResult2.extension);
+                const variantCtx = { ...storageCtx, originalName: variantFilename, contentType: processedResult2.mimeType };
+                const vr = await streamFileToStorage(storage, variantFileId, variantPath, variantCtx);
+                if (isPrimary) {
+                  await this.config.database?.updateFile(fileId, {
+                    url: vr.url,
+                    storageRef: vr.storageRef,
+                    size: vr.totalSize,
+                    contentType: processedResult2.mimeType,
+                    originalName: variantFilename
+                  });
+                } else {
+                  variantFileIds[qualityId] = variantFileId;
+                  if (this.config.database) {
+                    const vRecord = await this.config.database.createFile({
+                      id: variantFileId,
+                      sessionId: `${sessionId}_${qualityId}`,
+                      originalName: variantFilename,
+                      storedName: this.sanitizeFilename(variantFilename),
+                      fieldname: parsed.fields.fieldname || "file",
+                      contentType: processedResult2.mimeType,
+                      kind: detectKind(processedResult2.mimeType),
+                      size: vr.totalSize,
+                      chunkSize: vr.chunkSize,
+                      chunkCount: vr.chunkCount,
+                      uploadType,
+                      bucket: typeConfig.bucket || uploadType,
+                      storageProvider: resolveStorageKey(this.config, typeConfig),
+                      storageRef: vr.storageRef,
+                      url: vr.url,
+                      isComplete: true,
+                      metadata: { parentFileId: fileId, quality: qualityId, isVariant: true }
+                    });
+                    this.config.onUploadComplete?.(vRecord);
+                  }
+                }
+              }));
+              if (Object.keys(variantFileIds).length > 0) {
+                const existingFile2 = await this.config.database?.getFileById(fileId);
+                await this.config.database?.updateFile(fileId, {
+                  metadata: { ...existingFile2?.metadata || {}, variantFileIds }
+                });
+              }
+            }
+          } catch (processingError) {
+            console.error("[UploadEngine] Background media processing failed:", processingError);
+          } finally {
+            if (processedResult2?.cleanupFn) {
+              await processedResult2.cleanupFn().catch((e) => console.warn("[UploadEngine] Processed temp cleanup failed:", e));
+            }
+            if (assembledPath) {
+              await this.mediaProcessor.deleteTempFile(assembledPath).catch(() => {
+              });
+            }
+          }
+        }).catch((err) => {
+          console.error("[UploadEngine] Uncaught error in background task:", err);
+        });
+      } else {
+        if (assembledPath) {
+          await this.mediaProcessor.deleteTempFile(assembledPath).catch(() => {
+          });
+        }
       }
       if (finalFileRecord) this.config.onUploadComplete?.(finalFileRecord);
       const result = {
         status: "success",
         message: "File uploaded successfully",
         fileId,
-        url: finalUrl,
-        storageRef: finalStorageRef,
+        url: rawStorageResult.url,
+        storageRef: rawStorageResult.storageRef,
         progress: 100,
         metadata: this.extractCustomFields(parsed.fields),
         fields: this.extractCustomFields(parsed.fields),
         file: finalFileRecord ?? void 0,
-        fileFields: finalFileRecord ? { [finalFileRecord.fieldname || "file"]: finalFileRecord } : void 0,
-        thumbnailUrl,
-        ...Object.keys(variantResults).length > 0 ? { variants: variantResults } : {}
+        fileFields: finalFileRecord ? { [finalFileRecord.fieldname || "file"]: finalFileRecord } : void 0
       };
       if (finalFileRecord) req.fileFields = { [finalFileRecord.fieldname || "file"]: finalFileRecord };
       const autoRespond = typeConfig.autoRespond ?? this.config.autoRespond;
@@ -2150,16 +2195,12 @@ var UploadEngine = class {
         res.json(result);
       }
       return result;
-    } finally {
-      if (processedResult?.cleanupFn) {
-        await processedResult.cleanupFn().catch(
-          (e) => console.warn("[UploadEngine] Processed temp cleanup failed:", e)
-        );
-      }
+    } catch (e) {
       if (assembledPath) {
         await this.mediaProcessor.deleteTempFile(assembledPath).catch(() => {
         });
       }
+      throw e;
     }
   }
   // ── Non-chunked upload ────────────────────────────────────────────────────
@@ -2184,7 +2225,7 @@ var UploadEngine = class {
           const inputExt = path2.extname(file.filename) || inferExtFromMime(file.mimetype);
           const inputPath = await this.mediaProcessor.writeTempFile(originalBuffer, inputExt);
           try {
-            processedResult = await this.processMediaFromPath(inputPath, file.mimetype, file.filename, transformer);
+            processedResult = await this.processMediaFromPath(inputPath, file.mimetype, file.filename, transformer, fileId, sessionId);
             if (processedResult?.buffer) {
               processedBuffer = processedResult.buffer;
               processedMimeType = processedResult.mimeType;
@@ -2397,7 +2438,7 @@ var UploadEngine = class {
     }
     return !!(transformer && (mimetype.startsWith("image/") || mimetype.startsWith("video/") || mimetype.startsWith("audio/")));
   }
-  async processMediaFromPath(inputPath, mimetype, filename, transformer) {
+  async processMediaFromPath(inputPath, mimetype, filename, transformer, fileId, sessionId) {
     const mediaType = transformer.type ?? (mimetype.startsWith("video/") ? "video" : mimetype.startsWith("audio/") ? "audio" : mimetype.startsWith("image/") ? "image" : null);
     if (!mediaType) return null;
     const qualityConfigs = normaliseQualityConfigs(transformer);
@@ -2417,7 +2458,7 @@ var UploadEngine = class {
         thumbnailTimeSeconds: transformer.thumbnailTimeSeconds,
         onProgress: (progress) => this.config.onProgress?.({ ...progress, fileId: inputPath })
       };
-      this.config.onProcessingStart?.(inputPath, "session_native", { type: "video" });
+      this.config.onProcessingStart?.(fileId, sessionId, { type: "video", filename });
       return await this.mediaProcessor.processVideoFromPath(inputPath, mimetype, filename, cfg);
     }
     if (mediaType === "audio") {
@@ -2430,7 +2471,7 @@ var UploadEngine = class {
         audioBitrate: transformer.audioBitrate,
         onProgress: (progress) => this.config.onProgress?.({ ...progress, fileId: inputPath })
       };
-      this.config.onProcessingStart?.(inputPath, "session_native", { type: "audio" });
+      this.config.onProcessingStart?.(fileId, sessionId, { type: "audio", filename });
       return await this.mediaProcessor.processAudioFromPath(inputPath, mimetype, filename, cfg);
     }
     if (mediaType === "image") {
@@ -3564,6 +3605,7 @@ var DatabaseStorageAdapter = class {
       writeStream.on("finish", resolve);
       (async () => {
         try {
+          let totalBytesWritten = 0;
           for (let i = 0; i < totalChunks; i++) {
             const raw = await this.database.getChunk(fileId, i);
             if (!raw) {
@@ -3571,8 +3613,13 @@ var DatabaseStorageAdapter = class {
                 `[DatabaseStorageAdapter] Missing chunk ${i} for file "${fileId}"`
               );
             }
+            if (i < 3 || i === totalChunks - 1) {
+              const rawType = raw?.constructor?.name ?? typeof raw;
+              const rawLen = Buffer.isBuffer(raw) ? raw.length : raw?.buffer?.length ?? raw?.length?.() ?? "?";
+            }
             const buf = toBuffer(raw);
             const ok = writeStream.write(buf);
+            totalBytesWritten += buf.length;
             if (!ok) await new Promise((r) => writeStream.once("drain", r));
           }
           writeStream.end();
@@ -5973,27 +6020,27 @@ function decryptQueryString(token) {
 function deriveKey() {
   const keyString = (process.env.VITE_QUERY_STRING_KEY || "").padEnd(32, "0").slice(0, 32);
   if (isNodeJs()) {
-    const crypto = __require("crypto");
-    return crypto.createHash("sha256").update(keyString).digest();
+    const crypto2 = __require("crypto");
+    return crypto2.createHash("sha256").update(keyString).digest();
   } else if (isBun()) {
-    const crypto = __require("crypto");
-    const hash = crypto.createHash("sha256");
+    const crypto2 = __require("crypto");
+    const hash = crypto2.createHash("sha256");
     hash.update(keyString);
     return hash.digest();
   }
   throw new Error("[deriveKey] Unable to determine runtime");
 }
 function decryptNodeJs(encrypted, tag, iv, key) {
-  const crypto = __require("crypto");
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  const crypto2 = __require("crypto");
+  const decipher = crypto2.createDecipheriv("aes-256-gcm", key, iv);
   decipher.setAuthTag(tag);
   const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
   return decrypted.toString("utf8");
 }
 function decryptBun(encrypted, tag, iv, key) {
   try {
-    const crypto = __require("crypto");
-    const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+    const crypto2 = __require("crypto");
+    const decipher = crypto2.createDecipheriv("aes-256-gcm", key, iv);
     decipher.setAuthTag(tag);
     const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
     return decrypted.toString("utf8");
@@ -6003,11 +6050,11 @@ function decryptBun(encrypted, tag, iv, key) {
 }
 function hashString(input) {
   if (isNodeJs()) {
-    const crypto = __require("crypto");
-    return crypto.createHash("sha256").update(input).digest("hex");
+    const crypto2 = __require("crypto");
+    return crypto2.createHash("sha256").update(input).digest("hex");
   } else if (isBun()) {
-    const crypto = __require("crypto");
-    const hash = crypto.createHash("sha256");
+    const crypto2 = __require("crypto");
+    const hash = crypto2.createHash("sha256");
     hash.update(input);
     return hash.digest("hex");
   }
@@ -6015,21 +6062,21 @@ function hashString(input) {
 }
 function generateRandomString(byteLength = 32) {
   if (isNodeJs()) {
-    const crypto = __require("crypto");
-    return crypto.randomBytes(byteLength).toString("hex");
+    const crypto2 = __require("crypto");
+    return crypto2.randomBytes(byteLength).toString("hex");
   } else if (isBun()) {
-    const crypto = __require("crypto");
-    return crypto.randomBytes(byteLength).toString("hex");
+    const crypto2 = __require("crypto");
+    return crypto2.randomBytes(byteLength).toString("hex");
   }
   throw new Error("[generateRandomString] Unable to determine runtime");
 }
 function signData(data, secret) {
   if (isNodeJs()) {
-    const crypto = __require("crypto");
-    return crypto.createHmac("sha256", secret).update(data).digest("hex");
+    const crypto2 = __require("crypto");
+    return crypto2.createHmac("sha256", secret).update(data).digest("hex");
   } else if (isBun()) {
-    const crypto = __require("crypto");
-    return crypto.createHmac("sha256", secret).update(data).digest("hex");
+    const crypto2 = __require("crypto");
+    return crypto2.createHmac("sha256", secret).update(data).digest("hex");
   }
   throw new Error("[signData] Unable to determine runtime");
 }

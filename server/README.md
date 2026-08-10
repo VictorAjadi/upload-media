@@ -171,7 +171,9 @@ app.post('/api/upload', adapter.wrap(async (req, res) => {
     return {
       ...result,
       onBackground: async () => {
-        // Runs AFTER response sent
+        // NOTE: chunked uploads finish immediately after receiving the raw chunks.
+        // Any heavy variants/thumbnails execute natively in the background detached!
+        // Rely exclusively on the `onVariantComplete` configuration hook to update database URLs!
         await User.updateProfile(req.fields.userId, req.fileFields['avatar'].url);
       }
     };
@@ -261,7 +263,7 @@ interface UploadResult {
 | `maxTotalSize` | `number` | No | - | Maximum cumulative size of all files in an upload request. |
 | `staleUploadRetentionMs`| `number` | No | `86,400,000` (24h) | Cumulative TTL duration before partial chunk data is deleted. |
 | `mediaProcessor` | `MediaProcessorOptions` | No | - | Options for parallel and customized FFmpeg/Sharp media processing. |
-| `onProcessingStart` | `(fileId: string, sessionId: string, context: any) => void \| Promise<void>` | No | - | Fired dynamically exactly when a heavy background task (like FFmpeg) is detached into the background loops. |
+| `onProcessingStart` | `(fileId: string, sessionId: string, context: { type: string; filename: string }) => void \| Promise<void>` | No | - | Fired dynamically exactly when a heavy background task (like FFmpeg) is detached into the background loops. |
 | `onVariantComplete` | `(variantRecord: FileRecord, parentFileId: string) => void \| Promise<void>` | No | - | Real-time hook emitting sub-renders (e.g. 720p, 1080p, thumbnails) right as they finish, before full file completion. |
 | `onUploadComplete` | `(file: FileRecord) => void \| Promise<void>` | No | - | Callback triggered immediately after complete finalization. |
 | `onError` | `(err: Error, context: { uploadType?: string, sessionId?: string }) => void` | No | - | Centralized exception monitoring callback handler. |
@@ -1333,7 +1335,7 @@ const engine = new UploadEngine({
 - ✅ Files stream directly to the Cloud (S3/Cloudinary) — bypassing database binary storage.
 - ✅ Processed media variants stream back natively via `putStream`.
 - ⚠️ Requires sticky sessions — if an instance reboots mid-upload, that upload is lost.
-- ⚠️ Holds raw chunks in memory (in `partCache` or `chunkCache`) until the final assembly — monitor process memory usage.
+- ⚠️ Buffers chunks natively for final multiplexing, but transparently overflows massive streams (>50MB) straight to local temp disk to strictly enforce OOM safety limits under high concurrency.
 
 ### Option C: Shared Filesystem (EFS / NFS)
 

@@ -33,6 +33,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { Readable } from 'stream';
 import {
   NormalizedRequest,
@@ -206,7 +207,15 @@ export class UploadEngine {
       throw new ValidationError('No chunk data received', 400);
 
     const chunkFile = parsed.files[0];
-    const chunkBuffer = ensureBuffer(chunkFile.buffer);
+    let chunkBuffer: Buffer;
+    if (chunkFile.tempFilePath) {
+      chunkBuffer = await fs.promises.readFile(chunkFile.tempFilePath);
+      // Clean up the temporary file immediately after reading into memory
+      await fs.promises.unlink(chunkFile.tempFilePath).catch(() => {});
+    } else {
+      chunkBuffer = ensureBuffer(chunkFile.buffer);
+    }
+    
     const kind = detectKind(mimetype);
     assertKindAllowed(kind, typeConfig);
     assertWithinLimit(chunkBuffer.length, resolveSizeLimit(this.config, typeConfig, kind), 'File size');
@@ -216,7 +225,10 @@ export class UploadEngine {
 
     let existingFile = null;
     if (this.config.database) existingFile = await this.config.database.getFileBySessionId(sessionId);
-    const fileId = existingFile?.id ?? this.generateFileId();
+    // [FIX] ID-RACE: Derive deterministic fileId from sessionId for concurrent chunks
+    // so they all bind to the same entity even if chunk 0 hasn't created the DB record yet
+    const deterministicId = `file_${crypto.createHash('md5').update(sessionId).digest('hex').substring(0,16)}`;
+    const fileId = existingFile?.id ?? deterministicId;
 
     const isLastChunk = chunkIndex === totalChunks - 1;
 
@@ -281,160 +293,159 @@ export class UploadEngine {
         storage, fileId, totalChunks, inputExt, storageCtx
       );
 
-      let finalMimeType = mimetype;
-      let finalFilename = filename;
-
-      if (transformer && this.shouldProcessMedia(mimetype, transformer, storage)) {
-        try {
-          processedResult = await this.processMediaFromPath(
-            assembledPath, mimetype, filename, transformer
-          );
-          if (processedResult) {
-            finalMimeType = processedResult.mimeType;
-            finalFilename = replaceExtension(filename, `.${processedResult.extension}`);
-          }
-        } catch (processingError) {
-          console.error('[UploadEngine] Media processing failed, storing raw:', processingError);
-          processedResult = null;
+      // ── Post-assembly integrity check ────────────────────────────────────
+      try {
+        const stat = await fs.promises.stat(assembledPath);
+        console.log(
+          `[UploadEngine] Assembled file: ${assembledPath} ` +
+          `(${stat.size} bytes, expected ~${actualTotalSize} bytes, ${totalChunks} chunks)`
+        );
+        if (stat.size === 0) {
+          throw new Error(`[UploadEngine] Assembled file is 0 bytes — chunk data may be corrupt`);
         }
+        if (actualTotalSize > 0 && Math.abs(stat.size - actualTotalSize) > actualChunkSize) {
+          console.warn(
+            `[UploadEngine] ⚠️ Assembled file size mismatch: got ${stat.size}, ` +
+            `expected ~${actualTotalSize} (delta: ${Math.abs(stat.size - actualTotalSize)} bytes)`
+          );
+        }
+      } catch (statErr: any) {
+        if (statErr.code === 'ENOENT') throw new Error(`[UploadEngine] Assembled file not found at ${assembledPath}`);
+        if (statErr.message?.includes('0 bytes')) throw statErr;
+        console.warn('[UploadEngine] Assembly stat check warning:', statErr.message);
       }
 
-      // ── Store all variants (or single processed/raw file) ────────────────
-
-      const variantResults: Record<string, { url?: string; storageRef: string; fileId: string }> = {};
-      const variantFileIds: Record<string, string> = {};
-      let finalUrl: string | undefined;
-      let finalStorageRef: string | undefined;
-      let primaryEncodedSize = actualTotalSize;
-
-      let primaryChunkCount = 1;
-      let primaryChunkSize = actualChunkSize;
-
-      if (processedResult?.variantPaths && Object.keys(processedResult.variantPaths).length > 0) {
-        const entries = Object.entries(processedResult.variantPaths);
-
-        await Promise.all(entries.map(async ([qualityId, variantPath], i) => {
-          const isPrimary = i === 0;
-          const variantFileId = isPrimary ? fileId : buildVariantFileId(fileId, qualityId);
-          const variantFilename = buildVariantFilename(filename, qualityId, processedResult!.extension!);
-
-          const variantCtx = {
-            ...storageCtx,
-            originalName: variantFilename,
-            contentType: processedResult!.mimeType,
-          };
-
-          const vr = await streamFileToStorage(storage, variantFileId, variantPath, variantCtx);
-
-          if (isPrimary) {
-            finalUrl = vr.url;
-            finalStorageRef = vr.storageRef;
-            primaryEncodedSize = vr.totalSize;
-            primaryChunkCount = vr.chunkCount;
-            primaryChunkSize = vr.chunkSize;
-          }
-
-          variantResults[qualityId] = { url: vr.url, storageRef: vr.storageRef, fileId: variantFileId };
-
-          if (!isPrimary) {
-            variantFileIds[qualityId] = variantFileId;
-            if (this.config.database) {
-              const vRecord = await this.config.database.createFile({
-                id: variantFileId,
-                sessionId: `${sessionId}_${qualityId}`,
-                originalName: variantFilename,
-                storedName: this.sanitizeFilename(variantFilename),
-                fieldname: parsed.fields.fieldname || 'file',
-                contentType: processedResult!.mimeType!,
-                kind,
-                size: vr.totalSize,
-                chunkSize: vr.chunkSize,
-                chunkCount: vr.chunkCount,
-                uploadType,
-                bucket: typeConfig.bucket || uploadType,
-                storageProvider: resolveStorageKey(this.config, typeConfig),
-                storageRef: vr.storageRef,
-                url: vr.url,
-                isComplete: true,
-                metadata: { parentFileId: fileId, quality: qualityId, isVariant: true },
-              });
-              this.config.onUploadComplete?.(vRecord);
-            }
-          }
-        }));
-
-      } else {
-        // Single quality or raw fallback
-        const sourcePath = processedResult?.outputPath ?? assembledPath;
-        const singleCtx = {
-          ...storageCtx,
-          originalName: finalFilename,
-          contentType: finalMimeType,
-        };
-        const sr = await streamFileToStorage(storage, fileId, sourcePath, singleCtx);
-        finalUrl = sr.url;
-        finalStorageRef = sr.storageRef;
-        primaryEncodedSize = sr.totalSize;
-        primaryChunkCount = sr.chunkCount;
-        primaryChunkSize = sr.chunkSize;
-      }
-
-      let thumbnailUrl: string | undefined;
-      let thumbnailStorageRef: string | undefined;
-      if (processedResult?.thumbnail && storage.putObject) {
-        try {
-          const thumbId = `thumb_${fileId}`;
-          const thumbCtx = {
-            ...storageCtx,
-            originalName: `${path.basename(filename, path.extname(filename))}_thumb.jpg`,
-            contentType: 'image/jpeg',
-          };
-          const tr = await storage.putObject(thumbId, processedResult.thumbnail, thumbCtx);
-          thumbnailUrl = tr.url;
-          thumbnailStorageRef = tr.storageRef;
-        } catch (e) { console.warn('[UploadEngine] Thumbnail upload failed:', e); }
-      }
+      // ── IMMEDIATELY STORE RAW FILE ──
+      const singleCtx = {
+        ...storageCtx,
+        originalName: filename,
+        contentType: mimetype,
+      };
+      const rawStorageResult = await streamFileToStorage(storage, fileId, assembledPath, singleCtx);
 
       let finalFileRecord: FileRecord | null = null;
-
       if (this.config.database) {
         finalFileRecord = await this.config.database.updateFile(fileId, {
-          isComplete: true,
-          storageRef: finalStorageRef,
-          url: finalUrl,
-          contentType: finalMimeType,
-          originalName: finalFilename,
-          storedName: this.sanitizeFilename(finalFilename),
-          size: primaryEncodedSize,
-          chunkCount: primaryChunkCount,
-          chunkSize: primaryChunkSize,
-          thumbnailUrl,
-          thumbnailRef: thumbnailStorageRef,
-          ...(Object.keys(variantFileIds).length > 0 ? { variantFileIds } : {}),
+          isComplete: true, // Marked complete so client can consume original raw file
+          storageRef: rawStorageResult.storageRef,
+          url: rawStorageResult.url,
+          contentType: mimetype,
+          originalName: filename,
+          storedName: this.sanitizeFilename(filename),
+          size: actualTotalSize,
+          chunkCount: totalChunks,
+          chunkSize: actualChunkSize,
           updatedAt: Date.now(),
         });
       } else {
         finalFileRecord = {
           id: fileId, sessionId,
-          originalName: finalFilename,
-          storedName: this.sanitizeFilename(finalFilename),
+          originalName: filename,
+          storedName: this.sanitizeFilename(filename),
           fieldname: parsed.fields.fieldname || 'file',
-          contentType: finalMimeType,
-          kind,
-          size: primaryEncodedSize,
-          chunkSize: primaryChunkSize,
-          chunkCount: primaryChunkCount,
+          contentType: mimetype,
+          kind: detectKind(mimetype),
+          size: actualTotalSize,
+          chunkSize: actualChunkSize,
+          chunkCount: totalChunks,
           uploadType,
           bucket: typeConfig.bucket || uploadType,
           storageProvider: resolveStorageKey(this.config, typeConfig),
-          storageRef: finalStorageRef!,
-          url: finalUrl,
-          thumbnailUrl,
+          storageRef: rawStorageResult.storageRef,
+          url: rawStorageResult.url,
           isComplete: true,
           createdAt: Date.now(),
           updatedAt: Date.now(),
-          ...(Object.keys(variantFileIds).length > 0 ? { variantFileIds } : {}),
-        };
+        } as FileRecord;
+      }
+
+      // ── DEFER TRANSCODING TO BACKGROUND ──
+      if (transformer && this.shouldProcessMedia(mimetype, transformer, storage)) {
+        // Fire-and-forget background promise
+        Promise.resolve().then(async () => {
+          let processedResult: ExtendedProcessingResult | null = null;
+          try {
+            processedResult = await this.processMediaFromPath(assembledPath!, mimetype, filename, transformer, fileId, sessionId);
+            if (!processedResult) return;
+
+            const variantFileIds: Record<string, string> = {};
+            
+            // Thumbnail upload
+            let thumbnailUrl: string | undefined;
+            if (processedResult.thumbnail && storage.putObject) {
+              try {
+                const thumbId = `thumb_${fileId}`;
+                const thumbCtx = {
+                  ...storageCtx,
+                  originalName: `${path.basename(filename, path.extname(filename))}_thumb.jpg`,
+                  contentType: 'image/jpeg',
+                };
+                const tr = await storage.putObject(thumbId, processedResult.thumbnail, thumbCtx);
+                thumbnailUrl = tr.url;
+                await this.config.database?.updateFile(fileId, { thumbnailUrl, thumbnailRef: tr.storageRef });
+              } catch (e) { console.warn('[UploadEngine] Thumbnail upload failed:', e); }
+            }
+
+            // Variant uploads
+            if (processedResult.variantPaths && Object.keys(processedResult.variantPaths).length > 0) {
+              const entries = Object.entries(processedResult.variantPaths);
+              await Promise.all(entries.map(async ([qualityId, variantPath], i) => {
+                const isPrimary = i === 0;
+                const variantFileId = isPrimary ? fileId : buildVariantFileId(fileId, qualityId);
+                const variantFilename = buildVariantFilename(filename, qualityId, processedResult!.extension!);
+                const variantCtx = { ...storageCtx, originalName: variantFilename, contentType: processedResult!.mimeType };
+
+                const vr = await streamFileToStorage(storage, variantFileId, variantPath, variantCtx);
+
+                if (isPrimary) {
+                  // If we treat the first variant as a replacement to the raw file:
+                  await this.config.database?.updateFile(fileId, {
+                    url: vr.url, storageRef: vr.storageRef, size: vr.totalSize,
+                    contentType: processedResult!.mimeType, originalName: variantFilename,
+                  });
+                } else {
+                  variantFileIds[qualityId] = variantFileId;
+                  if (this.config.database) {
+                    const vRecord = await this.config.database.createFile({
+                      id: variantFileId, sessionId: `${sessionId}_${qualityId}`,
+                      originalName: variantFilename, storedName: this.sanitizeFilename(variantFilename),
+                      fieldname: parsed.fields.fieldname || 'file', contentType: processedResult!.mimeType!,
+                      kind: detectKind(processedResult!.mimeType!), size: vr.totalSize, chunkSize: vr.chunkSize,
+                      chunkCount: vr.chunkCount, uploadType, bucket: typeConfig.bucket || uploadType,
+                      storageProvider: resolveStorageKey(this.config, typeConfig),
+                      storageRef: vr.storageRef, url: vr.url, isComplete: true,
+                      metadata: { parentFileId: fileId, quality: qualityId, isVariant: true },
+                    });
+                    this.config.onUploadComplete?.(vRecord);
+                  }
+                }
+              }));
+
+              if (Object.keys(variantFileIds).length > 0) {
+                const existingFile = await this.config.database?.getFileById(fileId);
+                await this.config.database?.updateFile(fileId, {
+                  metadata: { ...(existingFile?.metadata || {}), variantFileIds }
+                });
+              }
+            }
+          } catch (processingError) {
+            console.error('[UploadEngine] Background media processing failed:', processingError);
+          } finally {
+            if (processedResult?.cleanupFn) {
+              await processedResult.cleanupFn().catch(e => console.warn('[UploadEngine] Processed temp cleanup failed:', e));
+            }
+            if (assembledPath) {
+              await this.mediaProcessor.deleteTempFile(assembledPath).catch(() => {});
+            }
+          }
+        }).catch(err => {
+          console.error('[UploadEngine] Uncaught error in background task:', err);
+        });
+      } else {
+        // If not processing, clean up the assembled path immediately
+        if (assembledPath) {
+          await this.mediaProcessor.deleteTempFile(assembledPath).catch(() => {});
+        }
       }
 
       if (finalFileRecord) this.config.onUploadComplete?.(finalFileRecord);
@@ -443,15 +454,13 @@ export class UploadEngine {
         status: 'success',
         message: 'File uploaded successfully',
         fileId,
-        url: finalUrl,
-        storageRef: finalStorageRef,
+        url: rawStorageResult.url,
+        storageRef: rawStorageResult.storageRef,
         progress: 100,
         metadata: this.extractCustomFields(parsed.fields),
         fields: this.extractCustomFields(parsed.fields),
         file: finalFileRecord ?? undefined,
         fileFields: finalFileRecord ? { [finalFileRecord.fieldname || 'file']: finalFileRecord } : undefined,
-        thumbnailUrl,
-        ...(Object.keys(variantResults).length > 0 ? { variants: variantResults } : {}),
       };
 
       if (finalFileRecord) req.fileFields = { [finalFileRecord.fieldname || 'file']: finalFileRecord };
@@ -459,16 +468,11 @@ export class UploadEngine {
       const autoRespond = typeConfig.autoRespond ?? this.config.autoRespond;
       if (autoRespond) { res.status(200); res.json(result); }
       return result;
-
-    } finally {
-      if (processedResult?.cleanupFn) {
-        await processedResult.cleanupFn().catch((e: any) =>
-          console.warn('[UploadEngine] Processed temp cleanup failed:', e)
-        );
-      }
+    } catch (e) {
       if (assembledPath) {
-        await this.mediaProcessor.deleteTempFile(assembledPath).catch(() => { });
+        await this.mediaProcessor.deleteTempFile(assembledPath).catch(() => {});
       }
+      throw e;
     }
   }
 
@@ -508,7 +512,7 @@ export class UploadEngine {
           const inputExt = path.extname(file.filename) || inferExtFromMime(file.mimetype);
           const inputPath = await this.mediaProcessor.writeTempFile(originalBuffer, inputExt);
           try {
-            processedResult = await this.processMediaFromPath(inputPath, file.mimetype, file.filename, transformer);
+            processedResult = await this.processMediaFromPath(inputPath, file.mimetype, file.filename, transformer, fileId, sessionId);
             if (processedResult?.buffer) {
               processedBuffer = processedResult.buffer;
               processedMimeType = processedResult.mimeType;
@@ -697,7 +701,9 @@ export class UploadEngine {
     inputPath: string,
     mimetype: string,
     filename: string,
-    transformer: FrontendTransformerConfig
+    transformer: FrontendTransformerConfig,
+    fileId: string,
+    sessionId: string
   ): Promise<ExtendedProcessingResult | null> {
     const mediaType =
       transformer.type ??
@@ -724,7 +730,7 @@ export class UploadEngine {
         onProgress: (progress) => this.config.onProgress?.({ ...progress, fileId: inputPath }),
       };
       
-      this.config.onProcessingStart?.(inputPath, 'session_native', { type: 'video' });
+      this.config.onProcessingStart?.(fileId, sessionId, { type: 'video', filename });
       return await this.mediaProcessor.processVideoFromPath(inputPath, mimetype, filename, cfg);
     }
 
@@ -739,7 +745,7 @@ export class UploadEngine {
         onProgress: (progress) => this.config.onProgress?.({ ...progress, fileId: inputPath }),
       };
       
-      this.config.onProcessingStart?.(inputPath, 'session_native', { type: 'audio' });
+      this.config.onProcessingStart?.(fileId, sessionId, { type: 'audio', filename });
       return await this.mediaProcessor.processAudioFromPath(inputPath, mimetype, filename, cfg);
     }
 
