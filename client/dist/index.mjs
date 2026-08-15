@@ -86,7 +86,8 @@ var useUploadProgress = createStore()(
             method: params.method,
             postData: params.postData,
             metadata: params.metadata,
-            uploadType: params.uploadType
+            uploadType: params.uploadType,
+            headers: params.headers
           };
           console.log("newupload", newUpload);
           state.uploads = state.uploads.filter((u) => u.uploadId !== params.uploadId);
@@ -117,7 +118,7 @@ var useUploadProgress = createStore()(
           state.uploadQueue.delete(nextUploadId);
           state.concurrentUploads += 1;
         });
-        const { uploadId, blobs, endpoint, method, postData, metadata, filenameArray, uploadType, transformer, mockNetworkDropRate } = params;
+        const { uploadId, blobs, endpoint, method, postData, metadata, filenameArray, uploadType, transformer, mockNetworkDropRate, headers } = params;
         set((state) => {
           state.uploads = state.uploads.filter((u) => u.uploadId !== uploadId);
           const fileItems = blobs.map((file, index) => ({
@@ -151,7 +152,8 @@ var useUploadProgress = createStore()(
             metadata,
             uploadType,
             allFilesSessionId: [],
-            mockNetworkDropRate
+            mockNetworkDropRate,
+            headers
           };
           state.uploads.push(newUpload);
           speedCalculators.set(uploadId, { samples: [] });
@@ -173,7 +175,8 @@ var useUploadProgress = createStore()(
           postData,
           metadata,
           uploadType,
-          transformer
+          transformer,
+          headers
         });
       },
       // ─── Progress Updates ────────────────────────────────────────────
@@ -557,7 +560,8 @@ var useUploadProgress = createStore()(
                     method: record.method,
                     postData: record.postData,
                     metadata: record.metadata,
-                    uploadType: record.uploadType
+                    uploadType: record.uploadType,
+                    headers: record.headers
                   });
                 }
               });

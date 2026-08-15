@@ -93,6 +93,7 @@ export interface AddUploadParams {
   postData?: Record<string, any>;
   metadata?: any[];
   uploadType: string;
+  headers?: Record<string, string>;
 }
 
 export interface InitializeUploadParams {
@@ -106,6 +107,7 @@ export interface InitializeUploadParams {
   uploadType: string;
   transformer?: TransformerConfig; // TransformerConfig from backend
   mockNetworkDropRate?: number;
+  headers?: Record<string, string>;
 }
 
 const speedCalculators = new Map<string, { samples: Array<{ timestamp: number; progress: number }> }>();
@@ -153,6 +155,7 @@ export const useUploadProgress = createStore<UploadProgressState>()(
             postData: params.postData,
             metadata: params.metadata,
             uploadType: params.uploadType,
+            headers: params.headers,
           };
           console.log("newupload", newUpload)
           state.uploads = state.uploads.filter((u) => u.uploadId !== params.uploadId);
@@ -192,7 +195,7 @@ export const useUploadProgress = createStore<UploadProgressState>()(
           state.concurrentUploads += 1;
         });
 
-        const { uploadId, blobs, endpoint, method, postData, metadata, filenameArray, uploadType, transformer, mockNetworkDropRate } = params;
+        const { uploadId, blobs, endpoint, method, postData, metadata, filenameArray, uploadType, transformer, mockNetworkDropRate, headers } = params;
 
         set((state: UploadProgressState) => {
           state.uploads = state.uploads.filter((u) => u.uploadId !== uploadId);
@@ -230,6 +233,7 @@ export const useUploadProgress = createStore<UploadProgressState>()(
             uploadType,
             allFilesSessionId: [],
             mockNetworkDropRate,
+            headers,
           };
 
           state.uploads.push(newUpload);
@@ -254,6 +258,7 @@ export const useUploadProgress = createStore<UploadProgressState>()(
           metadata,
           uploadType,
           transformer,
+          headers,
         });
       },
 
@@ -708,6 +713,7 @@ export const useUploadProgress = createStore<UploadProgressState>()(
                     postData: record.postData,
                     metadata: record.metadata,
                     uploadType: record.uploadType,
+                    headers: record.headers,
                   });
                 }
               });

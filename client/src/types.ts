@@ -107,6 +107,7 @@ export interface UploadProgress {
   metadata?: Array<FileMetadata>;
   uploadType?: string;
   mockNetworkDropRate?: number;
+  headers?: Record<string, string>;
 }
 
 export interface UploadOptions {
@@ -122,6 +123,7 @@ export interface UploadOptions {
   // Server-side transformation config
   transformer?: TransformerConfig;
   mockNetworkDropRate?: number;
+  headers?: Record<string, string>;
 }
 
 export interface UpdateProgressParams {
@@ -153,6 +155,7 @@ export interface WorkerMessage {
   clearType?: 'all' | 'completed' | 'failed' | 'single';
   uploadIds?: string[];
   requestId?: string;
+  headers?: Record<string, string>;
   [key: string]: any;
 }
 

@@ -394,6 +394,7 @@ export type WorkerProgress =
     maxRetriesReached?: boolean;
     transformer?: any;
     completedChunksMap?: Record<string, boolean>;
+    headers?: Record<string, string>;
   }
   | null;
 
@@ -453,7 +454,8 @@ async function uploadChunk(
   method: string,
   token: string,
   uploadId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  customHeaders?: Record<string, string>
 ): Promise<{ data: any }> {
   return withRetry(async () => {
     if (statusManager.isCancelled(uploadId)) throw new Error('Upload cancelled');
@@ -467,7 +469,7 @@ async function uploadChunk(
       }
     }
 
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...customHeaders };
     if (token) headers.Authorization = `Bearer ${token}`;
 
     const response = await fetch(endpoint, {
@@ -652,7 +654,8 @@ async function processFilesUpload(
                 uploadState.method || 'POST',
                 token,
                 uploadId,
-                abortController.signal
+                abortController.signal,
+                uploadState.headers
               );
 
               if (statusManager.isCancelled(uploadId) || statusManager.isPaused(uploadId)) {
@@ -811,7 +814,8 @@ async function processFilesUpload(
           uploadState.method || 'POST',
           token,
           uploadId,
-          abortController.signal
+          abortController.signal,
+          uploadState.headers
         );
 
         if (statusManager.isCancelled(uploadId) || statusManager.isPaused(uploadId)) {
@@ -1068,7 +1072,7 @@ self.addEventListener('message', async (event: MessageEvent) => {
 
       case 'upload':
         try {
-          const { uploadId: upId, blobArray, filenameArray, endpoint, method, postData, metadata, uploadType, transformer, resumeUpload = false } = event.data;
+          const { uploadId: upId, blobArray, filenameArray, endpoint, method, postData, metadata, uploadType, transformer, resumeUpload = false, headers } = event.data;
 
           let uploadState: WorkerProgress;
 
@@ -1114,7 +1118,8 @@ self.addEventListener('message', async (event: MessageEvent) => {
               lastUpdated: Date.now(),
               retryCount: 0,
               maxRetriesReached: false,
-              transformer
+              transformer,
+              headers
             };
 
             await storage.storeProgress(upId, uploadState);

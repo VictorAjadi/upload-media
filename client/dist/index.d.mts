@@ -107,6 +107,7 @@ interface UploadProgress {
     metadata?: Array<FileMetadata>;
     uploadType?: string;
     mockNetworkDropRate?: number;
+    headers?: Record<string, string>;
 }
 interface UploadOptions {
     endpoint: string;
@@ -120,6 +121,7 @@ interface UploadOptions {
     metadata?: Array<FileMetadata>;
     transformer?: TransformerConfig;
     mockNetworkDropRate?: number;
+    headers?: Record<string, string>;
 }
 interface UpdateProgressParams {
     progress: number;
@@ -147,6 +149,7 @@ interface WorkerMessage {
     clearType?: 'all' | 'completed' | 'failed' | 'single';
     uploadIds?: string[];
     requestId?: string;
+    headers?: Record<string, string>;
     [key: string]: any;
 }
 interface UploadResult {
@@ -203,6 +206,7 @@ interface AddUploadParams {
     postData?: Record<string, any>;
     metadata?: any[];
     uploadType: string;
+    headers?: Record<string, string>;
 }
 interface InitializeUploadParams {
     uploadId: string;
@@ -215,6 +219,7 @@ interface InitializeUploadParams {
     uploadType: string;
     transformer?: TransformerConfig;
     mockNetworkDropRate?: number;
+    headers?: Record<string, string>;
 }
 declare const useUploadProgress: Omit<Omit<zustand_vanilla.StoreApi<UploadProgressState>, "persist"> & {
     persist: {

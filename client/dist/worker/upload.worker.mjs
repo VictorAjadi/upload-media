@@ -361,7 +361,7 @@ async function withRetry(operation, uploadId, maxRetries = config.maxRetries) {
   }
   throw lastError || new Error("Operation failed after retries");
 }
-async function uploadChunk(formData, endpoint, method, token, uploadId, signal) {
+async function uploadChunk(formData, endpoint, method, token, uploadId, signal, customHeaders) {
   return withRetry(async () => {
     if (statusManager.isCancelled(uploadId)) throw new Error("Upload cancelled");
     if (statusManager.isPaused(uploadId)) throw new Error("Upload paused");
@@ -371,7 +371,7 @@ async function uploadChunk(formData, endpoint, method, token, uploadId, signal) 
         throw new Error("Simulated network connection drop");
       }
     }
-    const headers = {};
+    const headers = { ...customHeaders };
     if (token) headers.Authorization = `Bearer ${token}`;
     const response = await fetch(endpoint, {
       method: method.toUpperCase(),
@@ -517,7 +517,8 @@ async function processFilesUpload(uploadId, blobArray, filenameArray, uploadStat
                 uploadState.method || "POST",
                 token,
                 uploadId,
-                abortController.signal
+                abortController.signal,
+                uploadState.headers
               );
               if (statusManager.isCancelled(uploadId) || statusManager.isPaused(uploadId)) {
                 break;
@@ -651,7 +652,8 @@ async function processFilesUpload(uploadId, blobArray, filenameArray, uploadStat
           uploadState.method || "POST",
           token,
           uploadId,
-          abortController.signal
+          abortController.signal,
+          uploadState.headers
         );
         if (statusManager.isCancelled(uploadId) || statusManager.isPaused(uploadId)) {
           return;
@@ -878,7 +880,7 @@ self.addEventListener("message", async (event) => {
         return;
       case "upload":
         try {
-          const { uploadId: upId, blobArray, filenameArray, endpoint, method, postData, metadata, uploadType, transformer, resumeUpload = false } = event.data;
+          const { uploadId: upId, blobArray, filenameArray, endpoint, method, postData, metadata, uploadType, transformer, resumeUpload = false, headers } = event.data;
           let uploadState;
           if (resumeUpload) {
             uploadState = await storage.getProgress(upId);
@@ -917,7 +919,8 @@ self.addEventListener("message", async (event) => {
               lastUpdated: Date.now(),
               retryCount: 0,
               maxRetriesReached: false,
-              transformer
+              transformer,
+              headers
             };
             await storage.storeProgress(upId, uploadState);
             if (storageReady && blobArray) {

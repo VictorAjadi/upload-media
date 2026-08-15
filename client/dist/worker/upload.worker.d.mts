@@ -30,6 +30,7 @@ type WorkerProgress = {
     maxRetriesReached?: boolean;
     transformer?: any;
     completedChunksMap?: Record<string, boolean>;
+    headers?: Record<string, string>;
 } | null;
 
 export type { WorkerProgress };

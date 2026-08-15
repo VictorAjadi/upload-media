@@ -100,6 +100,7 @@ export function useUpload() {
         postData: options.postData,
         metadata: options.metadata,
         uploadType: options.uploadType || 'file',
+        headers: options.headers,
       });
 
       // Step 2: start the actual upload (worker)
@@ -113,6 +114,7 @@ export function useUpload() {
         metadata: options.metadata,
         uploadType: options.uploadType || 'file',
         transformer: options.transformer,
+        headers: options.headers,
       });
 
       return uploadId;
