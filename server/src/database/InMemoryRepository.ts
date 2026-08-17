@@ -70,6 +70,9 @@ export class InMemoryRepository implements MetadataRepository {
     if (query.uploadType) {
       results = results.filter((f) => f.uploadType === query.uploadType);
     }
+    if (query.bucket) {
+      results = results.filter((f) => f.bucket === query.bucket);
+    }
     if (query.userId) {
       results = results.filter((f) => f.userId === query.userId);
     }

@@ -76,6 +76,8 @@ __export(index_exports, {
   createLoggingHooks: () => createLoggingHooks,
   createMetricsHooks: () => createMetricsHooks,
   createNextjsAdapter: () => createNextjsAdapter,
+  createRawNodeAdapter: () => createRawNodeAdapter,
+  createRawNodeFileServingHandler: () => createRawNodeFileServingHandler,
   createRedisCacheHooks: () => createRedisCacheHooks,
   createStorageLoggingHooks: () => createStorageLoggingHooks,
   createTransformationHooks: () => createTransformationHooks,
@@ -2809,6 +2811,9 @@ var InMemoryRepository = class {
     if (query.uploadType) {
       results = results.filter((f) => f.uploadType === query.uploadType);
     }
+    if (query.bucket) {
+      results = results.filter((f) => f.bucket === query.bucket);
+    }
     if (query.userId) {
       results = results.filter((f) => f.userId === query.userId);
     }
@@ -3026,6 +3031,7 @@ var MongooseRepository = class _MongooseRepository {
     if (query.sessionIds) mongoQuery.sessionId = { $in: query.sessionIds };
     if (query.ids) mongoQuery.id = { $in: query.ids };
     if (query.uploadType) mongoQuery.uploadType = query.uploadType;
+    if (query.bucket) mongoQuery.bucket = query.bucket;
     if (query.userId) mongoQuery.userId = query.userId;
     if (query.isComplete !== void 0) mongoQuery.isComplete = query.isComplete;
     let q = this.fileModel.find(mongoQuery).lean();
@@ -3380,6 +3386,11 @@ var SQLRepository = class {
     if (query.uploadType) {
       conditions.push(`upload_type = $${paramCount}`);
       params.push(query.uploadType);
+      paramCount += 1;
+    }
+    if (query.bucket) {
+      conditions.push(`bucket = $${paramCount}`);
+      params.push(query.bucket);
       paramCount += 1;
     }
     if (query.userId) {
@@ -4504,18 +4515,29 @@ var FileServingHandler = class {
   rootDir;
   database;
   cacheMaxAge;
-  async serveFile(ref, res, startByte, endByte) {
+  async serveFile(ref, res, startByte, endByte, reqRaw, bucketName, onBeforeServe) {
     try {
       const fileId = this.extractFileId(ref);
       if (!this.database) {
+        if (onBeforeServe) await onBeforeServe(null, reqRaw);
         await this.serveFromDisk(ref, res, startByte, endByte);
         return;
       }
-      const fileRecord = await this.database.getFileById(fileId);
+      const files = await this.database.findFiles({ ids: [fileId], bucket: bucketName, limit: 1 });
+      const fileRecord = files[0];
       if (!fileRecord) {
         res.status(404);
-        res.json({ error: "File metadata not found" });
+        res.json({ error: "File metadata not found or restricted" });
         return;
+      }
+      if (onBeforeServe) {
+        try {
+          await onBeforeServe(fileRecord, reqRaw);
+        } catch (hooksErr) {
+          res.status(403);
+          res.json({ error: hooksErr.message || "Forbidden Access" });
+          return;
+        }
       }
       if (!fileRecord.isComplete) {
         res.status(423);
@@ -4977,7 +4999,7 @@ function createExpressFileServingMiddleware(config, legacyOptions) {
   const options = isLegacy ? legacyOptions : config;
   const handler = new FileServingHandler(
     rootDir,
-    // Might be undefined, handled inserveFile
+    // Might be undefined, handled in serveFile
     options?.database,
     options?.cacheMaxAge
   );
@@ -5002,8 +5024,12 @@ function createExpressFileServingMiddleware(config, legacyOptions) {
         }
       }
     }
+    let bucketName = options?.bucketName;
+    if (!bucketName && options?.strictBucketAccess) {
+      bucketName = req.baseUrl ? req.baseUrl.split("/").pop() : pathPrefix?.replace(/^\//, "");
+    }
     const normalizedRes = new ExpressNormalizedResponse(res);
-    handler.serveFile(ref, normalizedRes, startByte, endByte);
+    handler.serveFile(ref, normalizedRes, startByte, endByte, req, bucketName, options?.onBeforeServe);
   };
 }
 
@@ -5113,8 +5139,13 @@ function createKoaFileServingMiddleware(config, legacyOptions) {
         }
       }
     }
+    let bucketName = options?.bucketName;
+    if (!bucketName && options?.strictBucketAccess) {
+      const routePrefix = ctx._matchedRoute?.replace(/\/\(.*$/, "") || pathPrefix;
+      bucketName = routePrefix !== "/" ? routePrefix?.replace(/^\//, "") : void 0;
+    }
     const normalizedRes = new KoaNormalizedResponse(ctx);
-    await handler.serveFile(ref, normalizedRes, startByte, endByte);
+    await handler.serveFile(ref, normalizedRes, startByte, endByte, ctx, bucketName, options?.onBeforeServe);
   };
 }
 
@@ -5214,8 +5245,14 @@ function createFastifyFileServingPlugin(config, legacyOptions) {
           }
         }
       }
+      let bucketName = options?.bucketName;
+      if (!bucketName && options?.strictBucketAccess) {
+        const fullPath = req.url.split("?")[0];
+        const routePrefix = req.routeOptions?.url?.replace("/*", "") || pathPrefix;
+        bucketName = routePrefix !== "/" ? routePrefix?.replace(/^\//, "") : void 0;
+      }
       const normalizedRes = new FastifyNormalizedResponse(reply);
-      await handler.serveFile(ref, normalizedRes, startByte, endByte);
+      await handler.serveFile(ref, normalizedRes, startByte, endByte, req, bucketName, options?.onBeforeServe);
     });
   };
 }
@@ -5325,8 +5362,13 @@ function createHonoFileServingMiddleware(config, legacyOptions) {
         }
       }
     }
+    let bucketName = options?.bucketName;
+    if (!bucketName && options?.strictBucketAccess) {
+      const matched = ctx.req.routePath?.replace("/*", "") || pathPrefix;
+      bucketName = matched !== "/" ? matched?.replace(/^\//, "") : void 0;
+    }
     const normalizedRes = new HonoNormalizedResponse(ctx);
-    await handler.serveFile(ref, normalizedRes, startByte, endByte);
+    await handler.serveFile(ref, normalizedRes, startByte, endByte, ctx, bucketName, options?.onBeforeServe);
   };
 }
 
@@ -5473,19 +5515,16 @@ var createH3Adapter = () => ({
   }
 });
 var CreateH3FileServingHandler = class {
-  constructor(rootDir, database, cacheMaxAge = "1d") {
-    this.rootDir = rootDir;
-    this.database = database;
-    this.cacheMaxAge = cacheMaxAge;
+  options;
+  constructor(config, legacyOptions) {
+    const isLegacy = typeof config === "string";
+    this.options = isLegacy ? { rootDir: config, ...legacyOptions } : config;
   }
-  rootDir;
-  database;
-  cacheMaxAge;
   async serveFile(ref, event) {
     const handler = new FileServingHandler(
-      this.rootDir,
-      this.database,
-      this.cacheMaxAge
+      this.options.rootDir,
+      this.options.database,
+      this.options.cacheMaxAge
     );
     const rangeHeader = event.node.req.headers.range || event.node.req.headers.Range;
     let startByte;
@@ -5499,8 +5538,12 @@ var CreateH3FileServingHandler = class {
         }
       }
     }
+    let bucketName = this.options?.bucketName;
+    if (!bucketName && this.options?.strictBucketAccess) {
+      bucketName = this.options.pathPrefix?.replace(/^\//, "");
+    }
     const normalizedRes = new H3NormalizedResponse(event);
-    await handler.serveFile(ref, normalizedRes, startByte, endByte);
+    await handler.serveFile(ref, normalizedRes, startByte, endByte, event, bucketName, this.options.onBeforeServe);
   }
 };
 
@@ -5637,12 +5680,19 @@ function createElysiaFileServingHandler(config, legacyOptions) {
         }
       }
     }
+    let bucketName = options?.bucketName;
+    if (!bucketName && options?.strictBucketAccess) {
+      bucketName = options.pathPrefix?.replace(/^\//, "");
+    }
     const normalizedRes = new ElysiaNormalizedResponse();
     await handler.serveFile(
       ref,
       normalizedRes,
       startByte,
-      endByte
+      endByte,
+      ctx,
+      bucketName,
+      options?.onBeforeServe
     );
     return normalizedRes.raw;
   };
@@ -5744,20 +5794,16 @@ var createNextjsAdapter = () => ({
   }
 });
 var CreateNextjsFileServingHandler = class {
-  constructor(config) {
-    this.config = config;
+  options;
+  constructor(config, legacyOptions) {
+    const isLegacy = typeof config === "string";
+    this.options = isLegacy ? { rootDir: config, ...legacyOptions } : config;
   }
-  config;
   async serveFile(ref, req) {
-    const config = this.config;
-    const isString = typeof config === "string";
-    const rootDir = isString ? config : config.rootDir;
-    const database = isString ? void 0 : config.database;
-    const cacheMaxAge = isString ? "1d" : config.cacheMaxAge || "1d";
     const handler = new FileServingHandler(
-      rootDir,
-      database,
-      cacheMaxAge
+      this.options.rootDir,
+      this.options.database,
+      this.options.cacheMaxAge
     );
     const bridge = new NextjsNormalizedResponse();
     let startByte;
@@ -5782,15 +5828,160 @@ var CreateNextjsFileServingHandler = class {
         }
       }
     }
+    let bucketName = this.options?.bucketName;
+    if (!bucketName && this.options?.strictBucketAccess) {
+      bucketName = this.options.pathPrefix?.replace(/^\//, "");
+    }
     await handler.serveFile(
       ref,
       bridge,
       startByte,
-      endByte
+      endByte,
+      req,
+      bucketName,
+      this.options.onBeforeServe
     );
     return bridge.raw;
   }
 };
+
+// src/adapters/frameworks/RawNodeAdapter.ts
+var RawNodeNormalizedRequest = class {
+  headers;
+  stream;
+  query;
+  params;
+  user;
+  raw;
+  fields;
+  files;
+  fileFields;
+  constructor(req) {
+    this.raw = req;
+    this.headers = req.headers;
+    this.stream = req;
+    const protocol = req.headers["x-forwarded-proto"] === "https" || req.socket?.encrypted ? "https" : "http";
+    const url = new URL(req.url || "", `${protocol}://${req.headers.host || "localhost"}`);
+    this.query = Object.fromEntries(url.searchParams);
+    this.params = {};
+    this.user = req.user;
+  }
+};
+var RawNodeNormalizedResponse = class {
+  res;
+  statusCode = 200;
+  constructor(res) {
+    this.res = res;
+  }
+  status(code) {
+    this.statusCode = code;
+    this.res.statusCode = code;
+    return this;
+  }
+  json(body) {
+    this.res.setHeader("Content-Type", "application/json");
+    this.res.end(JSON.stringify(body));
+  }
+  header(name, value) {
+    this.res.setHeader(name, value);
+    return this;
+  }
+  end() {
+    this.res.end();
+  }
+  async pipeFrom(stream) {
+    this.res.setHeader("Content-Type", "application/octet-stream");
+    return new Promise((resolve, reject) => {
+      stream.on("error", reject);
+      this.res.on("error", reject);
+      this.res.on("finish", resolve);
+      stream.pipe(this.res);
+    });
+  }
+  get raw() {
+    return this.res;
+  }
+};
+var createRawNodeAdapter = () => ({
+  name: "raw-node",
+  wrap(handler) {
+    return async (req, res) => {
+      const normalizedReq = new RawNodeNormalizedRequest(req);
+      const normalizedRes = new RawNodeNormalizedResponse(res);
+      try {
+        const result = await handler(normalizedReq, normalizedRes);
+        if (result !== void 0 && !res.headersSent) {
+          normalizedRes.json(result);
+        }
+        if (result && typeof result.onBackground === "function") {
+          res.on("finish", () => {
+            result.onBackground().catch((err) => console.error("[RawNodeAdapter] Background task error:", err));
+          });
+        }
+      } catch (error) {
+        console.error("[RawNodeAdapter] Handler error:", error);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: error instanceof Error ? error.message : "Internal error" }));
+        }
+      }
+    };
+  }
+});
+function createRawNodeFileServingHandler(config, legacyOptions) {
+  const isLegacy = typeof config === "string";
+  const rootDir = isLegacy ? config : config.rootDir;
+  const options = isLegacy ? legacyOptions : config;
+  const handler = new FileServingHandler(
+    rootDir,
+    options?.database,
+    options?.cacheMaxAge
+  );
+  const pathPrefix = options?.pathPrefix || "/uploads";
+  return async (req, res) => {
+    const protocol = req.headers["x-forwarded-proto"] === "https" || req.socket?.encrypted ? "https" : "http";
+    const pathname = new URL(
+      req.url || "/",
+      `${protocol}://${req.headers.host || "localhost"}`
+    ).pathname;
+    if (!pathname.startsWith(pathPrefix)) {
+      return false;
+    }
+    const ref = pathname.slice(pathPrefix.length).replace(/^\//, "");
+    if (!ref) {
+      return false;
+    }
+    const rangeHeader = req.headers.range;
+    let startByte;
+    let endByte;
+    if (rangeHeader) {
+      const match = rangeHeader.match(
+        /bytes=(\d+)-(\d*)/
+      );
+      if (match) {
+        startByte = parseInt(match[1], 10);
+        if (match[2]) {
+          endByte = parseInt(match[2], 10);
+        }
+      }
+    }
+    let bucketName = options?.bucketName;
+    if (!bucketName && options?.strictBucketAccess) {
+      bucketName = options.pathPrefix?.replace(/^\//, "");
+    }
+    const normalizedRes = new RawNodeNormalizedResponse(res);
+    await handler.serveFile(
+      ref,
+      normalizedRes,
+      startByte,
+      endByte,
+      req,
+      bucketName,
+      options?.onBeforeServe
+    );
+    return true;
+  };
+}
 
 // src/hooks/examples.ts
 function createRedisCacheHooks(redis) {
@@ -6225,6 +6416,8 @@ function verifySignature(data, secret, signature) {
   createLoggingHooks,
   createMetricsHooks,
   createNextjsAdapter,
+  createRawNodeAdapter,
+  createRawNodeFileServingHandler,
   createRedisCacheHooks,
   createStorageLoggingHooks,
   createTransformationHooks,

@@ -297,6 +297,11 @@ export class SQLRepository implements MetadataRepository {
       params.push(query.uploadType);
       paramCount += 1;
     }
+    if (query.bucket) {
+      conditions.push(`bucket = $${paramCount}`);
+      params.push(query.bucket);
+      paramCount += 1;
+    }
     if (query.userId) {
       conditions.push(`user_id = $${paramCount}`);
       params.push(query.userId);

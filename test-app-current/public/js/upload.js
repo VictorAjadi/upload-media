@@ -81,6 +81,7 @@ uploadBtn.addEventListener('click', () => {
         filenameArray: files.map(f => f.name),
         endpoint: `http://localhost:3000/api/upload?uploadType=${uploadType}`,
         method: 'POST',
+        headers: { Authorization: 'Bearer secret-token-123' },
         metadata: {
             uploadType: uploadType,
             timestamp: new Date().toISOString()
@@ -132,7 +133,7 @@ uploadDirectBtn.addEventListener('click', async () => {
 
             if (result.file) {
                 const fileData = result.file;
-                const url = fileData.url || `http://localhost:3000/uploads/${uploadType}/${fileData.id}`;
+                const url = fileData.url || `http://localhost:3000/${uploadType}/${fileData.id}?token=secret-token-123`;
 
                 if (file.type.startsWith('image/')) {
                     addToGallery(file.name, url, 'image');
@@ -175,6 +176,7 @@ uploadFieldsBtn.addEventListener('click', () => {
         filenameArray: files.map(f => f.name),
         endpoint: 'http://localhost:3000/api/upload?uploadType=video',
         method: 'POST',
+        headers: { Authorization: 'secret-token-123' },
         postData: {
             caption: 'This is a test post with image and video',
             tags: ['test', 'upload', 'premium', 'multi-field']
@@ -240,6 +242,7 @@ uploadTransBtn.addEventListener('click', () => {
         filenameArray: [file.name],
         endpoint: `http://localhost:3000/api/upload?uploadType=${uploadType}`,
         method: 'POST',
+        headers: { Authorization: 'secret-token-123' },
         transformer,
         metadata: {
             transformed: true,
@@ -310,6 +313,7 @@ uploadMultiBtn.addEventListener('click', () => {
         filenameArray: [file.name],
         endpoint: `http://localhost:3000/api/upload?uploadType=${uploadType}`,
         method: 'POST',
+        headers: { Authorization: 'secret-token-123' },
         postData: {
             title: 'My Media',
             description: 'A great upload'
@@ -649,8 +653,8 @@ useUploadProgress.subscribe((state) => {
 
         // ─── If completed, add to gallery ──────────────────────────
         if (status === 'completed' && upload.fileId) {
-            const baseUrl = `http://localhost:3000/uploads/${upload.uploadType || 'avatar'}`;
-            const url = upload.url || `${baseUrl}/${upload.fileId}`;
+            const baseUrl = `http://localhost:3000/${upload.uploadType || 'avatar'}`;
+            const url = upload.url || `${baseUrl}/${upload.fileId}?token=secret-token-123`;
 
             if (fileType.startsWith('image/')) {
                 addToGallery(name, url, 'image');

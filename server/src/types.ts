@@ -262,6 +262,7 @@ export interface FileQuery {
   sessionIds?: string[];
   ids?: string[];
   uploadType?: string;
+  bucket?: string;
   userId?: string;
   isComplete?: boolean;
   limit?: number;
@@ -477,4 +478,14 @@ export interface UploadResultPayload {
   file?: FileRecord;
   chunkIndex?: number;
   totalChunks?: number;
+}
+
+export interface FileServingOptions {
+  rootDir?: string;
+  cacheMaxAge?: string;
+  pathPrefix?: string;
+  database?: MetadataRepository;
+  strictBucketAccess?: boolean;
+  bucketName?: string;
+  onBeforeServe?: (file: FileRecord, req: any) => Promise<void> | void;
 }

@@ -8,3 +8,4 @@ dist
 test-app-*/node_modules/
 test-app-*/uploads/
 test-app-*/temp-uploads/
+/post

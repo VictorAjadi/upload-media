@@ -1,6 +1,7 @@
 import { Readable } from 'stream';
 import mongoose, { Model, Schema } from 'mongoose';
 import { Context as Context$2 } from 'hono';
+import { IncomingMessage, ServerResponse } from 'http';
 
 /**
  * @upload-media/server - Hook System Types
@@ -289,6 +290,7 @@ interface FileQuery {
     sessionIds?: string[];
     ids?: string[];
     uploadType?: string;
+    bucket?: string;
     userId?: string;
     isComplete?: boolean;
     limit?: number;
@@ -503,6 +505,15 @@ interface UploadResultPayload {
     file?: FileRecord;
     chunkIndex?: number;
     totalChunks?: number;
+}
+interface FileServingOptions {
+    rootDir?: string;
+    cacheMaxAge?: string;
+    pathPrefix?: string;
+    database?: MetadataRepository;
+    strictBucketAccess?: boolean;
+    bucketName?: string;
+    onBeforeServe?: (file: FileRecord, req: any) => Promise<void> | void;
 }
 
 /**
@@ -1325,16 +1336,8 @@ type Request = any;
 type Response$1 = any;
 
 declare const createExpressAdapter: () => FrameworkAdapter;
-declare function createExpressFileServingMiddleware(config: string | {
-    rootDir?: string;
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-}, legacyOptions?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-}): (req: Request, res: Response$1, next: Function) => any;
+
+declare function createExpressFileServingMiddleware(config: string | FileServingOptions, legacyOptions?: FileServingOptions): (req: Request, res: Response$1, next: Function) => any;
 
 /**
  * @upload-media/server - KoaAdapter
@@ -1345,16 +1348,7 @@ type Context$1 = any;
 type Next = any;
 
 declare const createKoaAdapter: () => FrameworkAdapter;
-declare function createKoaFileServingMiddleware(config: string | {
-    rootDir?: string;
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-}, legacyOptions?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-}): (ctx: Context$1, next: Next) => Promise<any>;
+declare function createKoaFileServingMiddleware(config: string | FileServingOptions, legacyOptions?: FileServingOptions): (ctx: Context$1, next: Next) => Promise<any>;
 
 /**
  * @upload-media/server - FastifyAdapter
@@ -1364,16 +1358,7 @@ declare function createKoaFileServingMiddleware(config: string | {
 type FastifyInstance = any;
 
 declare const createFastifyAdapter: () => FrameworkAdapter;
-declare function createFastifyFileServingPlugin(config: string | {
-    rootDir?: string;
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-}, legacyOptions?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-}): (fastify: FastifyInstance) => Promise<void>;
+declare function createFastifyFileServingPlugin(config: string | FileServingOptions, legacyOptions?: FileServingOptions): (fastify: FastifyInstance) => Promise<void>;
 
 /**
  * @upload-media/server - HonoAdapter
@@ -1382,16 +1367,8 @@ declare function createFastifyFileServingPlugin(config: string | {
  */
 
 declare const createHonoAdapter: () => FrameworkAdapter;
-declare function createHonoFileServingMiddleware(config: string | {
-    rootDir?: string;
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-}, legacyOptions?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-}): (ctx: Context$2, next: Function) => Promise<any>;
+
+declare function createHonoFileServingMiddleware(config: string | FileServingOptions, legacyOptions?: FileServingOptions): (ctx: Context$2, next: Function) => Promise<any>;
 
 /**
  * @upload-media/server - H3Adapter
@@ -1424,11 +1401,10 @@ interface H3EventLike {
     };
 }
 declare const createH3Adapter: () => FrameworkAdapter;
+
 declare class CreateH3FileServingHandler {
-    private rootDir;
-    private database?;
-    private cacheMaxAge;
-    constructor(rootDir: string, database?: MetadataRepository | undefined, cacheMaxAge?: string);
+    private options;
+    constructor(config: string | FileServingOptions, legacyOptions?: FileServingOptions);
     serveFile(ref: string, event: H3EventLike): Promise<void>;
 }
 
@@ -1445,16 +1421,8 @@ type Context = any;
  * ----------------------------
  */
 declare const createElysiaAdapter: () => FrameworkAdapter;
-declare function createElysiaFileServingHandler(config: string | {
-    rootDir?: string;
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-}, legacyOptions?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-}): (ctx: Context) => Promise<Response | undefined>;
+
+declare function createElysiaFileServingHandler(config: string | FileServingOptions, legacyOptions?: FileServingOptions): (ctx: Context) => Promise<Response | undefined>;
 
 /**
  * @upload-media/server - NextjsAdapter
@@ -1464,15 +1432,22 @@ declare function createElysiaFileServingHandler(config: string | {
 type NextRequest = any;
 
 declare const createNextjsAdapter: () => FrameworkAdapter;
+
 declare class CreateNextjsFileServingHandler {
-    private config;
-    constructor(config: string | {
-        rootDir?: string;
-        cacheMaxAge?: string;
-        database?: MetadataRepository;
-    });
+    private options;
+    constructor(config: string | FileServingOptions, legacyOptions?: FileServingOptions);
     serveFile(ref: string, req?: NextRequest): Promise<Response>;
 }
+
+/**
+ * @upload-media/server - RawNodeAdapter
+ *
+ * Wraps a framework-agnostic UploadHandler for raw Node.js http.Server.
+ * Also works with serverless handlers that receive req/res directly.
+ */
+
+declare const createRawNodeAdapter: () => FrameworkAdapter;
+declare function createRawNodeFileServingHandler(config: string | FileServingOptions, legacyOptions?: FileServingOptions): (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 
 /**
  * @upload-media/server - Hook Examples
@@ -1549,4 +1524,4 @@ declare function signData(data: string, secret: string): string;
  */
 declare function verifySignature(data: string, secret: string, signature: string): boolean;
 
-export { AUTH_CACHE_TTL_SECONDS, type AudioProcessingConfig, CACHE_PREFIXES, type CacheAdapter, type ChunkCacheStrategy, type ChunkRecord, CloudinaryStorageAdapter, type CloudinaryStorageOptions, ConfigValidationError, CreateH3FileServingHandler, CreateNextjsFileServingHandler, DEFAULT_CACHE_TTL_SECONDS, DEFAULT_CHUNK_SIZES, DEFAULT_CLEANUP_BATCH_SIZE, DEFAULT_CLEANUP_INTERVAL_MS, DEFAULT_QUALITY, DEFAULT_SIZE_LIMITS, DEFAULT_STALE_UPLOAD_RETENTION_MS, type DatabaseHooks, DatabaseStorageAdapter, type DatabaseStorageOptions, type FieldValidationRule, type FileInfo, type FileQuery, type FileRecord, type FileRecordPatch, type FileValidationRule, type FrameworkAdapter, type FrontendTransformerConfig, type H3EventLike, type HandlerResult, type HookContext, type ImageProcessingConfig, InMemoryRepository, type IncomingChunkFields, LocalDiskStorageAdapter, type LocalDiskStorageOptions, type MediaKind, type MediaProcessorOptions, type MetadataRepository, MongooseRepository, type MongooseRepositoryOptions, MultipartParser, type NewFileRecord, type NormalizedRequest, type NormalizedResponse, type ParseOptions, type ParsedFile, type ParsedMultipart, type ParserHooks, type ProcessedMediaVariant, type ProcessingResult, QUALITY_MAPPINGS, type Quality, type QualityConfig, type ResolutionLabel, type ResolvedQuality, type ResolvedUploadEngineConfig, S3StorageAdapter, type S3StorageOptions, type SQLExecutor, SQLRepository, type SQLRepositoryOptions, SUPPORTED_MIME_TYPES, type SizeLimitMap, type StorageAdapter, type StorageContext, type StorageHooks, type StorageReadOptions, type StorageWriteResult, type StreamWriteResult, THUMBNAIL_CHUNK_SIZE, THUMBNAIL_DIMENSIONS, THUMBNAIL_SIZE_LIMIT, type ThumbnailGenerator, UploadEngine, type UploadEngineConfig, type UploadHandler, type UploadHooks, type UploadResult, type UploadResultPayload, type UploadTypeConfig, ValidationError, type VideoProcessingConfig, type VideoQualityConfig, assertKindAllowed, assertRequiredFields, assertWithinLimit, chainHooks, createAutoCleanupHooks, createElysiaAdapter, createElysiaFileServingHandler, createExpressAdapter, createExpressFileServingMiddleware, createFastifyAdapter, createFastifyFileServingPlugin, createH3Adapter, createHonoAdapter, createHonoFileServingMiddleware, createKoaAdapter, createKoaFileServingMiddleware, createLoggingHooks, createMetricsHooks, createNextjsAdapter, createRedisCacheHooks, createStorageLoggingHooks, createTransformationHooks, createValidationHooks, decryptQueryString, detectKind, generateRandomString, getMimeKind, hashString, parseBooleanFlag, parseIntSafe, parseJsonSafe, resolveChunkLimit, resolveSizeLimit, resolveStorageKey, resolveUploadConfig, signData, toBuffer, verifySignature };
+export { AUTH_CACHE_TTL_SECONDS, type AudioProcessingConfig, CACHE_PREFIXES, type CacheAdapter, type ChunkCacheStrategy, type ChunkRecord, CloudinaryStorageAdapter, type CloudinaryStorageOptions, ConfigValidationError, CreateH3FileServingHandler, CreateNextjsFileServingHandler, DEFAULT_CACHE_TTL_SECONDS, DEFAULT_CHUNK_SIZES, DEFAULT_CLEANUP_BATCH_SIZE, DEFAULT_CLEANUP_INTERVAL_MS, DEFAULT_QUALITY, DEFAULT_SIZE_LIMITS, DEFAULT_STALE_UPLOAD_RETENTION_MS, type DatabaseHooks, DatabaseStorageAdapter, type DatabaseStorageOptions, type FieldValidationRule, type FileInfo, type FileQuery, type FileRecord, type FileRecordPatch, type FileServingOptions, type FileValidationRule, type FrameworkAdapter, type FrontendTransformerConfig, type H3EventLike, type HandlerResult, type HookContext, type ImageProcessingConfig, InMemoryRepository, type IncomingChunkFields, LocalDiskStorageAdapter, type LocalDiskStorageOptions, type MediaKind, type MediaProcessorOptions, type MetadataRepository, MongooseRepository, type MongooseRepositoryOptions, MultipartParser, type NewFileRecord, type NormalizedRequest, type NormalizedResponse, type ParseOptions, type ParsedFile, type ParsedMultipart, type ParserHooks, type ProcessedMediaVariant, type ProcessingResult, QUALITY_MAPPINGS, type Quality, type QualityConfig, type ResolutionLabel, type ResolvedQuality, type ResolvedUploadEngineConfig, S3StorageAdapter, type S3StorageOptions, type SQLExecutor, SQLRepository, type SQLRepositoryOptions, SUPPORTED_MIME_TYPES, type SizeLimitMap, type StorageAdapter, type StorageContext, type StorageHooks, type StorageReadOptions, type StorageWriteResult, type StreamWriteResult, THUMBNAIL_CHUNK_SIZE, THUMBNAIL_DIMENSIONS, THUMBNAIL_SIZE_LIMIT, type ThumbnailGenerator, UploadEngine, type UploadEngineConfig, type UploadHandler, type UploadHooks, type UploadResult, type UploadResultPayload, type UploadTypeConfig, ValidationError, type VideoProcessingConfig, type VideoQualityConfig, assertKindAllowed, assertRequiredFields, assertWithinLimit, chainHooks, createAutoCleanupHooks, createElysiaAdapter, createElysiaFileServingHandler, createExpressAdapter, createExpressFileServingMiddleware, createFastifyAdapter, createFastifyFileServingPlugin, createH3Adapter, createHonoAdapter, createHonoFileServingMiddleware, createKoaAdapter, createKoaFileServingMiddleware, createLoggingHooks, createMetricsHooks, createNextjsAdapter, createRawNodeAdapter, createRawNodeFileServingHandler, createRedisCacheHooks, createStorageLoggingHooks, createTransformationHooks, createValidationHooks, decryptQueryString, detectKind, generateRandomString, getMimeKind, hashString, parseBooleanFlag, parseIntSafe, parseJsonSafe, resolveChunkLimit, resolveSizeLimit, resolveStorageKey, resolveUploadConfig, signData, toBuffer, verifySignature };

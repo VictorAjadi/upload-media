@@ -23,6 +23,7 @@ export * from './adapters/frameworks/HonoAdapter';
 export * from './adapters/frameworks/H3Adapter';
 export * from './adapters/frameworks/ElysiaAdapter';
 export * from './adapters/frameworks/NextjsAdapter';
+export * from './adapters/frameworks/RawNodeAdapter';
 
 // Hooks
 export * from './hooks/types';

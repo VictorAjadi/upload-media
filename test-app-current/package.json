@@ -18,6 +18,8 @@
     "immer": "^10.0.2",
     "mongoose": "^7.8.0",
     "sharp": "^0.35.2",
+    "upload-media-client": "^1.2.1",
+    "upload-media-server": "^1.2.3",
     "zustand": "^4.4.1"
   },
   "overrides": {

@@ -1025,16 +1025,41 @@ const engine = new UploadEngine({
 
 ### File Serving Middleware
 
-Deterministic dispatch based on `storageProvider` metadata:
+Deterministic dispatch based on `storageProvider` metadata natively bound to routes!
 
 ```typescript
-// Database-backed serving
+// 1. Basic Database-backed serving
 app.use('/media', createExpressFileServingMiddleware({
   database,
   cacheMaxAge: '30d'
 }));
 
-// Local disk serving
+// 2. Strict Bucket Access (Auto-Inferring Buckets)
+// Because this is mounted at '/premium-videos', strictBucketAccess will automatically 
+// extract the bucket name and enforce that ONLY files belonging to the 'premium-videos' bucket 
+// can be served from this route!
+app.use('/premium-videos', createExpressFileServingMiddleware({
+  database,
+  strictBucketAccess: true, 
+  onBeforeServe: async (file, req) => {
+    // Run custom Auth checks seamlessly inline
+    const token = req.headers.authorization || req.query.token;
+    if (!token) throw new Error('Unauthorized Access');
+    
+    const userUser = await verifyAuth(token);
+    if (!userUser.hasPremium) throw new Error('Upgrade required');
+  }
+}));
+
+// 3. Strict Bucket Access (Explicit Override)
+// Hardcodes the 'avatars' bucket constraint, completely bypassing any URL mount inference.
+app.use('/api/v1/user-images', createExpressFileServingMiddleware({
+  database,
+  strictBucketAccess: true, 
+  bucketName: 'avatars'
+}));
+
+// 4. Local disk serving (backwards compatibility)
 app.use('/uploads', createExpressFileServingMiddleware({
   rootDir: './uploads',
   database
@@ -1046,7 +1071,8 @@ app.use('/uploads', createExpressFileServingMiddleware({
 - **Partial Content (Seek)**: Native `Accept-Ranges: bytes` support.
 - **Identity Integrity**: File extension is virtual; actual MIME from database.
 - **Performance Caching**: Compatible with Mongoose performance cache.
-- **Lifecycle Hooks**: Inject auth via `onBeforeServe`, audit via `onAfterServe`.
+- **Strict Bucket Isolation**: Native validation locks down routes to specific uploadType buckets.
+- **Lifecycle Intercepts**: Inject custom Authentication safely using `onBeforeServe`.
 
 ### Serving Dispatch Logic
 
@@ -1055,24 +1081,6 @@ app.use('/uploads', createExpressFileServingMiddleware({
 | `'local'` | Streams from `rootDir` on disk. |
 | `'database'` | Pipes binary chunks directly from SQL/MongoDB. |
 | `'s3' / 'cloudinary' / other` | 302 redirect to provider's signed URL. |
-
-### Custom Serving with Hooks
-
-```typescript
-app.use('/api/assets', createExpressFileServingMiddleware({
-  database,
-  onBeforeServe: async (fileId, req) => {
-    // RBAC check
-    if (!req.user.hasPremium) {
-      throw new Error('Upgrade required');
-    }
-  },
-  onAfterServe: async (file, stats) => {
-    // Download auditing
-    await logDownload(file.id, stats.bytes, stats.ip);
-  }
-}));
-```
 
 ---
 

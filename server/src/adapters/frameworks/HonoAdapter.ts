@@ -100,18 +100,12 @@ export const createHonoAdapter = (): FrameworkAdapter => ({
   },
 });
 
+import { FileServingOptions } from '../../types';
+
 export function createHonoFileServingMiddleware(
-  config: string | {
-    rootDir?: string;
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  },
-  legacyOptions?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  }) {
+  config: string | FileServingOptions,
+  legacyOptions?: FileServingOptions
+) {
   const isLegacy = typeof config === 'string';
   const rootDir = isLegacy ? config : config.rootDir;
   const options = isLegacy ? legacyOptions : config;
@@ -150,7 +144,14 @@ export function createHonoFileServingMiddleware(
       }
     }
 
+    let bucketName: string | undefined = options?.bucketName;
+    if (!bucketName && options?.strictBucketAccess) {
+        // Hono routing path is matched using route syntax, usually from ctx.req.routePath
+        const matched = ctx.req.routePath?.replace('/*', '') || pathPrefix;
+        bucketName = matched !== '/' ? matched?.replace(/^\//, '') : undefined;
+    }
+
     const normalizedRes = new HonoNormalizedResponse(ctx);
-    await handler.serveFile(ref, normalizedRes, startByte, endByte);
+    await handler.serveFile(ref, normalizedRes, startByte, endByte, ctx, bucketName, options?.onBeforeServe);
   };
 }

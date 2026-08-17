@@ -6,7 +6,7 @@
  */
 
 import { IncomingMessage, ServerResponse } from 'http';
-import { NormalizedRequest, NormalizedResponse, UploadHandler, FrameworkAdapter } from '../../types';
+import { NormalizedRequest, NormalizedResponse, UploadHandler, FrameworkAdapter, FileServingOptions } from '../../types';
 import { Readable } from 'stream';
 import { FileServingHandler } from '../../core/FileServingHandler';
 import { MetadataRepository } from '../../types';
@@ -27,7 +27,8 @@ class RawNodeNormalizedRequest implements NormalizedRequest {
     this.stream = req;
 
     // Parse query string
-    const url = new URL(req.url || '', `http://${req.headers.host}`);
+    const protocol = req.headers['x-forwarded-proto'] === 'https' || (req.socket as any)?.encrypted ? 'https' : 'http';
+    const url = new URL(req.url || '', `${protocol}://${req.headers.host || 'localhost'}`);
     this.query = Object.fromEntries(url.searchParams);
     this.params = {};
 
@@ -108,15 +109,15 @@ export const createRawNodeAdapter = (): FrameworkAdapter => ({
 
 
 export function createRawNodeFileServingHandler(
-  rootDir: string,
-  options?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  }
+  config: string | FileServingOptions,
+  legacyOptions?: FileServingOptions
 ) {
+  const isLegacy = typeof config === 'string';
+  const rootDir = isLegacy ? config : config.rootDir;
+  const options = isLegacy ? legacyOptions : config;
+
   const handler = new FileServingHandler(
-    rootDir,
+    rootDir!,
     options?.database,
     options?.cacheMaxAge
   );
@@ -127,9 +128,10 @@ export function createRawNodeFileServingHandler(
     req: IncomingMessage,
     res: ServerResponse
   ) => {
+    const protocol = req.headers['x-forwarded-proto'] === 'https' || (req.socket as any)?.encrypted ? 'https' : 'http';
     const pathname = new URL(
       req.url || '/',
-      `http://${req.headers.host || 'localhost'}`
+      `${protocol}://${req.headers.host || 'localhost'}`
     ).pathname;
 
     if (!pathname.startsWith(pathPrefix)) {
@@ -163,6 +165,11 @@ export function createRawNodeFileServingHandler(
       }
     }
 
+    let bucketName: string | undefined = options?.bucketName;
+    if (!bucketName && options?.strictBucketAccess) {
+        bucketName = options.pathPrefix?.replace(/^\//, '');
+    }
+
     const normalizedRes =
       new RawNodeNormalizedResponse(res);
 
@@ -170,7 +177,10 @@ export function createRawNodeFileServingHandler(
       ref,
       normalizedRes,
       startByte,
-      endByte
+      endByte,
+      req,
+      bucketName,
+      options?.onBeforeServe
     );
 
     return true; // Handled

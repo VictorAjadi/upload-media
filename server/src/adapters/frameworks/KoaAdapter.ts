@@ -9,7 +9,7 @@ type Context = any;
 // @ts-ignore
 type Next = any;
 import { FileServingHandler } from '../../core/FileServingHandler';
-import { NormalizedRequest, NormalizedResponse, UploadHandler, FrameworkAdapter, MetadataRepository } from '../../types';
+import { NormalizedRequest, NormalizedResponse, UploadHandler, FrameworkAdapter, MetadataRepository, FileServingOptions } from '../../types';
 import { Readable } from 'stream';
 
 class KoaNormalizedRequest implements NormalizedRequest {
@@ -102,17 +102,9 @@ export const createKoaAdapter = (): FrameworkAdapter => ({
 });
 
 export function createKoaFileServingMiddleware(
-  config: string | {
-    rootDir?: string;
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  },
-  legacyOptions?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  }) {
+  config: string | FileServingOptions,
+  legacyOptions?: FileServingOptions
+) {
   const isLegacy = typeof config === 'string';
   const rootDir = isLegacy ? config : config.rootDir;
   const options = isLegacy ? legacyOptions : config;
@@ -151,7 +143,15 @@ export function createKoaFileServingMiddleware(
       }
     }
 
+    let bucketName: string | undefined = options?.bucketName;
+    if (!bucketName && options?.strictBucketAccess) {
+        // If mounted in koa-router, ctx._matchedRoute usually holds the route string.
+        // Otherwise, fallback to the pathPrefix passed in.
+        const routePrefix = (ctx as any)._matchedRoute?.replace(/\/\(.*$/, '') || pathPrefix;
+        bucketName = routePrefix !== '/' ? routePrefix?.replace(/^\//, '') : undefined;
+    }
+
     const normalizedRes = new KoaNormalizedResponse(ctx);
-    await handler.serveFile(ref, normalizedRes, startByte, endByte);
+    await handler.serveFile(ref, normalizedRes, startByte, endByte, ctx, bucketName, options?.onBeforeServe);
   };
 }

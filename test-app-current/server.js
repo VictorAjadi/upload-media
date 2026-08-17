@@ -73,18 +73,32 @@ const database = new MongooseRepository({
 });
 
 // ============================================
-// STEP 3: File serving middleware with database-backed storage
+// STEP 3: Multi-Route File Serving with Strict Buckets & Auth
 // ============================================
-// Note: With DatabaseStorageAdapter, files are served from the database,
-// not from the filesystem. The middleware will stream chunks from MongoDB.
-app.use(createExpressFileServingMiddleware(
-  path.join(__dirname, 'uploads'), // This path is less relevant now
-  {
-    database,
-    cacheMaxAge: '7d',
-    pathPrefix: '/uploads'
+app.use('/avatar', createExpressFileServingMiddleware({
+  database,
+  strictBucketAccess: true,
+  cacheMaxAge: '7d'
+}));
+
+app.use('/video', createExpressFileServingMiddleware({
+  database,
+  strictBucketAccess: true,
+  cacheMaxAge: '7d',
+  onBeforeServe: async (fileId, req) => {
+    // Custom auth logic for videos!
+    const token = req.headers.authorization || req.query.token;
+    if (token !== 'secret-token-123' && token !== 'Bearer secret-token-123') {
+      throw new Error('Unauthorized Access to premium videos');
+    }
   }
-));
+}));
+
+app.use('/audio', createExpressFileServingMiddleware({
+  database,
+  strictBucketAccess: true,
+  cacheMaxAge: '7d'
+}));
 
 // ============================================
 // STEP X: Server Sent Events (SSE) Setup

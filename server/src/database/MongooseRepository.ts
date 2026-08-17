@@ -242,6 +242,7 @@ export class MongooseRepository implements MetadataRepository {
     if (query.sessionIds) mongoQuery.sessionId = { $in: query.sessionIds };
     if (query.ids) mongoQuery.id = { $in: query.ids };
     if (query.uploadType) mongoQuery.uploadType = query.uploadType;
+    if (query.bucket) mongoQuery.bucket = query.bucket;
     if (query.userId) mongoQuery.userId = query.userId;
     if (query.isComplete !== undefined) mongoQuery.isComplete = query.isComplete;
 

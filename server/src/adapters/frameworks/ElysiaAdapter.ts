@@ -193,18 +193,11 @@ export const createElysiaAdapter =
     },
   });
 
+import { FileServingOptions } from '../../types';
+
 export function createElysiaFileServingHandler(
-  config: string | {
-    rootDir?: string;
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  },
-  legacyOptions?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  }
+  config: string | FileServingOptions,
+  legacyOptions?: FileServingOptions
 ) {
   const isLegacy = typeof config === 'string';
   const rootDir = isLegacy ? config : config.rootDir;
@@ -254,6 +247,11 @@ export function createElysiaFileServingHandler(
       }
     }
 
+    let bucketName: string | undefined = options?.bucketName;
+    if (!bucketName && options?.strictBucketAccess) {
+        bucketName = options.pathPrefix?.replace(/^\//, '');
+    }
+
     const normalizedRes =
       new ElysiaNormalizedResponse();
 
@@ -261,7 +259,10 @@ export function createElysiaFileServingHandler(
       ref,
       normalizedRes,
       startByte,
-      endByte
+      endByte,
+      ctx,
+      bucketName,
+      options?.onBeforeServe
     );
 
     return normalizedRes.raw;

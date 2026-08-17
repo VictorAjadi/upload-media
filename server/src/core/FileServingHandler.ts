@@ -43,21 +43,37 @@ export class FileServingHandler {
         ref: string,
         res: NormalizedResponse,
         startByte?: number,
-        endByte?: number
+        endByte?: number,
+        reqRaw?: any,
+        bucketName?: string,
+        onBeforeServe?: (file: any, req: any) => Promise<void> | void
     ): Promise<void> {
         try {
             const fileId = this.extractFileId(ref);
             if (!this.database) {
+                if (onBeforeServe) await onBeforeServe(null, reqRaw);
                 await this.serveFromDisk(ref, res, startByte, endByte);
                 return;
             }
 
-            const fileRecord = await this.database.getFileById(fileId);
+            // Verify in a single fetch using bucket
+            const files = await this.database.findFiles({ ids: [fileId], bucket: bucketName, limit: 1 });
+            const fileRecord = files[0];
 
             if (!fileRecord) {
                 res.status(404);
-                res.json({ error: 'File metadata not found' });
+                res.json({ error: 'File metadata not found or restricted' });
                 return;
+            }
+
+            if (onBeforeServe) {
+                try {
+                    await onBeforeServe(fileRecord, reqRaw);
+                } catch (hooksErr: any) {
+                    res.status(403);
+                    res.json({ error: hooksErr.message || 'Forbidden Access' });
+                    return;
+                }
             }
 
             if (!fileRecord.isComplete) {

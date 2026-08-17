@@ -11,7 +11,7 @@ type FastifyReply = any;
 // @ts-ignore
 type FastifyInstance = any;
 import { FileServingHandler } from '../../core/FileServingHandler';
-import { NormalizedRequest, NormalizedResponse, UploadHandler, FrameworkAdapter, MetadataRepository } from '../../types';
+import { NormalizedRequest, NormalizedResponse, UploadHandler, FrameworkAdapter, MetadataRepository, FileServingOptions } from '../../types';
 
 class FastifyNormalizedRequest implements NormalizedRequest {
   headers: Record<string, string | string[] | undefined>;
@@ -97,17 +97,8 @@ export const createFastifyAdapter = (): FrameworkAdapter => ({
 });
 
 export function createFastifyFileServingPlugin(
-  config: string | {
-    rootDir?: string;
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  },
-  legacyOptions?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  }
+  config: string | FileServingOptions,
+  legacyOptions?: FileServingOptions
 ) {
   const isLegacy = typeof config === 'string';
   const rootDir = isLegacy ? config : config.rootDir;
@@ -139,8 +130,16 @@ export function createFastifyFileServingPlugin(
         }
       }
 
+      let bucketName: string | undefined = options?.bucketName;
+      if (!bucketName && options?.strictBucketAccess) {
+         const fullPath = req.url.split('?')[0]; // router matches
+         // Use routeOptions in fastify, or fallback to the prefix
+         const routePrefix = (req.routeOptions as any)?.url?.replace('/*', '') || pathPrefix;
+         bucketName = routePrefix !== '/' ? routePrefix?.replace(/^\//, '') : undefined;
+      }
+
       const normalizedRes = new FastifyNormalizedResponse(reply);
-      await handler.serveFile(ref, normalizedRes, startByte, endByte);
+      await handler.serveFile(ref, normalizedRes, startByte, endByte, req, bucketName, options?.onBeforeServe);
     });
   };
 }

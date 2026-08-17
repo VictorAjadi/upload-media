@@ -75,6 +75,7 @@ export function FileUploader() {
       {
         endpoint: 'http://localhost:3000/api/upload',
         method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
         uploadType: 'video', // Backend type config
         postData: { userId: '123' },
         // Backend media processing options
@@ -497,6 +498,7 @@ setUploadMediaConfig({
 | `uploadType` | `string` | Yes | Target configuration type on the server (e.g. `'video'`, `'avatar'`). |
 | `endpoint` | `string` | Yes | Server URL for chunk ingestion. |
 | `method` | `string` | No | HTTP method (default: `'POST'`). |
+| `headers` | `object` | No | Custom HTTP headers (e.g. `{ Authorization: 'Bearer token...' }`). |
 | `metadata` | `object[]` | No | Array of metadata objects matching each blob index. |
 | `postData` | `object` | No | Extra form fields sent as part of the chunk payload. |
 | `transformer` | `object` | No | Transformation instructions for server-side processing. |

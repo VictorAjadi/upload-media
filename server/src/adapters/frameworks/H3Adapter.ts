@@ -280,21 +280,27 @@ export const createH3Adapter =
     },
   });
 
+import { FileServingOptions } from '../../types';
+
 export class CreateH3FileServingHandler {
+  private options: FileServingOptions;
+
   constructor(
-    private rootDir: string,
-    private database?: MetadataRepository,
-    private cacheMaxAge: string = '1d'
-  ) { }
+    config: string | FileServingOptions,
+    legacyOptions?: FileServingOptions
+  ) {
+    const isLegacy = typeof config === 'string';
+    this.options = isLegacy ? { rootDir: config, ...legacyOptions } : config;
+  }
 
   async serveFile(
     ref: string,
     event: H3EventLike
   ): Promise<void> {
     const handler = new FileServingHandler(
-      this.rootDir,
-      this.database,
-      this.cacheMaxAge
+      this.options.rootDir,
+      this.options.database,
+      this.options.cacheMaxAge
     );
 
     const rangeHeader = event.node.req.headers.range || (event.node.req.headers as any).Range;
@@ -311,7 +317,13 @@ export class CreateH3FileServingHandler {
       }
     }
 
+    let bucketName: string | undefined = this.options?.bucketName;
+    if (!bucketName && this.options?.strictBucketAccess) {
+        // H3 routers vary wildly, we fall back to the manually assigned pathPrefix
+        bucketName = this.options.pathPrefix?.replace(/^\//, '');
+    }
+
     const normalizedRes = new H3NormalizedResponse(event);
-    await handler.serveFile(ref, normalizedRes, startByte, endByte);
+    await handler.serveFile(ref, normalizedRes, startByte, endByte, event, bucketName, this.options.onBeforeServe);
   }
 }

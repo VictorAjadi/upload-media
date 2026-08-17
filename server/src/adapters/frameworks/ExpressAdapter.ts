@@ -100,18 +100,11 @@ export const createExpressAdapter = (): FrameworkAdapter => ({
   },
 });
 
+import { FileServingOptions } from '../../types';
+
 export function createExpressFileServingMiddleware(
-  config: string | {
-    rootDir?: string;
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  },
-  legacyOptions?: {
-    cacheMaxAge?: string;
-    pathPrefix?: string;
-    database?: MetadataRepository;
-  }
+  config: string | FileServingOptions,
+  legacyOptions?: FileServingOptions
 ) {
   // Support legacy signature (rootDir, options) and new signature (options)
   const isLegacy = typeof config === 'string';
@@ -119,7 +112,7 @@ export function createExpressFileServingMiddleware(
   const options = isLegacy ? legacyOptions : config;
 
   const handler = new FileServingHandler(
-    rootDir!, // Might be undefined, handled inserveFile
+    rootDir!, // Might be undefined, handled in serveFile
     options?.database,
     options?.cacheMaxAge
   );
@@ -155,7 +148,14 @@ export function createExpressFileServingMiddleware(
       }
     }
 
+    let bucketName: string | undefined = options?.bucketName;
+    if (!bucketName && options?.strictBucketAccess) {
+        // Automatically infer bucket from the mount path (e.g., app.use('/images', ...))
+        // This picks up "images" even if mounted at "/api/v1/images"
+        bucketName = req.baseUrl ? req.baseUrl.split('/').pop() : pathPrefix?.replace(/^\//, '');
+    }
+
     const normalizedRes = new ExpressNormalizedResponse(res);
-    handler.serveFile(ref, normalizedRes, startByte, endByte);
+    handler.serveFile(ref, normalizedRes, startByte, endByte, req, bucketName, options?.onBeforeServe);
   };
 }

@@ -171,26 +171,24 @@ export const createNextjsAdapter =
   });
 
 
+import { FileServingOptions } from '../../types';
+
 export class CreateNextjsFileServingHandler {
+  private options: FileServingOptions;
+
   constructor(
-    private config: string | {
-      rootDir?: string;
-      cacheMaxAge?: string;
-      database?: MetadataRepository;
-    }
-  ) { }
+    config: string | FileServingOptions,
+    legacyOptions?: FileServingOptions
+  ) {
+    const isLegacy = typeof config === 'string';
+    this.options = isLegacy ? { rootDir: config, ...legacyOptions } : config;
+  }
 
   async serveFile(ref: string, req?: NextRequest): Promise<Response> {
-    const config = this.config;
-    const isString = typeof config === 'string';
-    const rootDir = isString ? config : config.rootDir;
-    const database = isString ? undefined : config.database;
-    const cacheMaxAge = isString ? '1d' : (config.cacheMaxAge || '1d');
-
     const handler = new FileServingHandler(
-      rootDir,
-      database,
-      cacheMaxAge
+      this.options.rootDir,
+      this.options.database,
+      this.options.cacheMaxAge
     );
 
     const bridge =
@@ -198,7 +196,7 @@ export class CreateNextjsFileServingHandler {
 
     let startByte: number | undefined;
     let endByte: number | undefined;
-
+    
     if (req) {
       const headers = req.headers;
       let rangeHeader: string | null = null;
@@ -221,11 +219,19 @@ export class CreateNextjsFileServingHandler {
       }
     }
 
+    let bucketName: string | undefined = this.options?.bucketName;
+    if (!bucketName && this.options?.strictBucketAccess) {
+        bucketName = this.options.pathPrefix?.replace(/^\//, '');
+    }
+
     await handler.serveFile(
       ref,
       bridge as any,
       startByte,
-      endByte
+      endByte,
+      req,
+      bucketName,
+      this.options.onBeforeServe
     );
 
     return bridge.raw;
